@@ -28,9 +28,39 @@ func NewGFlights() (*GFlights, error) {
 
 func (g *GFlights) Explore(
 	ctx context.Context,
+	req Request,
 	origin string,
-) ([]itinery.Itinery, error) {
-	return nil, nil
+) ([]itinery.ExploreItinery, error) {
+	offers, err := g.s.GetExplore(ctx, gflights.ExploreArgs{
+		DepartureDate: req.DepartureDate,
+		ReturnDate:    req.ReturnDate,
+		SrcCities:     []string{origin},
+		Options: gflights.Options{
+			Travelers: gflights.Travelers{
+				Adults:   req.Adults,
+				Children: req.Children,
+			},
+			Class:    gflights.Class(req.Class),
+			Currency: req.Currency,
+			TripType: gflights.RoundTrip,
+			Stops:    gflights.AnyStops,
+		},
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	ei := make([]itinery.ExploreItinery, 0)
+
+	for _, offer := range offers {
+		ei = append(ei, itinery.ExploreItinery{
+			Destination: offer.AirportCode,
+			Price:       float64(offer.Price),
+		})
+	}
+
+	return ei, nil
 }
 
 func (g *GFlights) Search(

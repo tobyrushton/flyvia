@@ -9,8 +9,9 @@ import (
 type Provider interface {
 	Explore(
 		ctx context.Context,
+		req Request,
 		origin string,
-	) ([]itinery.Itinery, error)
+	) ([]itinery.ExploreItinery, error)
 	Search(
 		ctx context.Context,
 		req Request,
