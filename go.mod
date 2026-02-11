@@ -2,7 +2,7 @@ module github.com/tobyrushton/flyvia
 
 go 1.24.0
 
-require github.com/tobyrushton/gflights v0.2.0
+require github.com/tobyrushton/gflights v0.2.1
 
 require (
 	github.com/anyascii/go v0.3.3 // indirect
