@@ -9,7 +9,6 @@ type Leg struct {
 	ArrivalTime      time.Time
 	DepartureAirport string
 	ArrivalAirport   string
-	Cost             float64
 }
 
 type Flight struct {

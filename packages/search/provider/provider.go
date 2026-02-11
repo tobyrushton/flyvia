@@ -3,16 +3,16 @@ package provider
 import (
 	"context"
 
-	"github.com/tobyrushton/flyvia/packages/leg"
+	"github.com/tobyrushton/flyvia/packages/search/itinery"
 )
 
 type Provider interface {
 	Explore(
 		ctx context.Context,
 		origin string,
-	) ([]leg.Leg, error)
+	) ([]itinery.Itinery, error)
 	Search(
 		ctx context.Context,
-		origin, destination string,
-	) ([]leg.Leg, error)
+		req Request,
+	) ([]itinery.Itinery, error)
 }
