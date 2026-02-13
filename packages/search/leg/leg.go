@@ -9,6 +9,7 @@ type Leg struct {
 	ArrivalTime      time.Time
 	DepartureAirport string
 	ArrivalAirport   string
+	Duration         time.Duration
 }
 
 type Flight struct {

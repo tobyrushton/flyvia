@@ -16,4 +16,5 @@ type Provider interface {
 		ctx context.Context,
 		req Request,
 	) ([]itinery.Itinery, error)
+	SortByPrice(itineries *[]itinery.Itinery)
 }

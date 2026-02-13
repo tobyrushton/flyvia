@@ -130,6 +130,7 @@ func (g *GFlights) Search(
 							ArrivalTime:      of.ReturnDate,
 							Stops:            len(of.Flight) - 1,
 							Flights:          gflightsFlightsToLegFlights(of.Flight),
+							Duration:         of.ReturnDate.Sub(of.DepartureDate),
 						},
 						Inbound: leg.Leg{
 							DepartureAirport: rf.Flight[0].DepAirportCode,
@@ -138,6 +139,7 @@ func (g *GFlights) Search(
 							ArrivalTime:      rf.Flight[len(rf.Flight)-1].ArrTime,
 							Stops:            len(rf.Flight) - 1,
 							Flights:          gflightsFlightsToLegFlights(rf.Flight),
+							Duration:         rf.Flight[len(rf.Flight)-1].ArrTime.Sub(rf.Flight[0].DepTime),
 						},
 						Price:      rf.Price,
 						BookingURL: url,
@@ -152,6 +154,12 @@ func (g *GFlights) Search(
 	wg.Wait()
 
 	return itineries, nil
+}
+
+func (g *GFlights) SortByPrice(itins *[]itinery.Itinery) {
+	sort.Slice(*itins, func(i, j int) bool {
+		return (*itins)[i].Price < (*itins)[j].Price
+	})
 }
 
 func gflightsFlightToLegFlight(gf gflights.Flight) leg.Flight {
