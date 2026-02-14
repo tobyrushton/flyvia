@@ -9,6 +9,7 @@ import (
 	"github.com/tobyrushton/flyvia/packages/search/itinery"
 	"github.com/tobyrushton/flyvia/packages/search/leg"
 	"github.com/tobyrushton/gflights"
+	"github.com/tobyrushton/gflights/iata"
 )
 
 type GFlights struct {
@@ -31,10 +32,13 @@ func (g *GFlights) Explore(
 	req Request,
 	origin string,
 ) ([]itinery.ExploreItinery, error) {
+	srcCities, srcAirports := g.sortLocations([]string{origin})
+
 	offers, err := g.s.GetExplore(ctx, gflights.ExploreArgs{
 		DepartureDate: req.DepartureDate,
 		ReturnDate:    req.ReturnDate,
-		SrcCities:     []string{origin},
+		SrcCities:     srcCities,
+		SrcAirports:   srcAirports,
 		Options: gflights.Options{
 			Travelers: gflights.Travelers{
 				Adults:   req.Adults,
@@ -67,11 +71,16 @@ func (g *GFlights) Search(
 	ctx context.Context,
 	req Request,
 ) ([]itinery.Itinery, error) {
+	srcCities, srcAirports := g.sortLocations([]string{req.Origin})
+	dstCities, dstAirports := g.sortLocations([]string{req.Destination})
+
 	outboundFlights, _, err := g.s.GetOutboundOffers(ctx, gflights.Args{
 		DepartureDate: req.DepartureDate,
 		ReturnDate:    req.ReturnDate,
-		SrcCities:     []string{req.Origin},
-		DstCities:     []string{req.Destination},
+		SrcCities:     srcCities,
+		SrcAirports:   srcAirports,
+		DstCities:     dstCities,
+		DstAirports:   dstAirports,
 		Options: gflights.Options{
 			Travelers: gflights.Travelers{
 				Adults:   req.Adults,
@@ -160,6 +169,21 @@ func (g *GFlights) SortByPrice(itins *[]itinery.Itinery) {
 	sort.Slice(*itins, func(i, j int) bool {
 		return (*itins)[i].Price < (*itins)[j].Price
 	})
+}
+
+func (g *GFlights) sortLocations(locations []string) ([]string, []string) {
+	cities := make([]string, 0)
+	airports := make([]string, 0)
+
+	for _, loc := range locations {
+		tz := iata.IATATimeZone(loc)
+		if tz.City == "Not supported IATA Code" {
+			cities = append(cities, loc)
+		} else {
+			airports = append(airports, loc)
+		}
+	}
+	return cities, airports
 }
 
 func gflightsFlightToLegFlight(gf gflights.Flight) leg.Flight {
