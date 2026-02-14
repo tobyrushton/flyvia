@@ -33,7 +33,7 @@ func New(
 }
 
 func (s *Search) Search(req provider.Request) ([]Result, error) {
-	return nil, nil
+	return s.doSearch(req)
 }
 
 func (s *Search) doSearch(req provider.Request) ([]Result, error) {
