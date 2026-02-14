@@ -4,10 +4,17 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/tobyrushton/flyvia/packages/search/averages"
+	"github.com/tobyrushton/flyvia/packages/search/combine"
 	"github.com/tobyrushton/flyvia/packages/search/itinery"
 	"github.com/tobyrushton/flyvia/packages/search/provider"
+)
+
+const (
+	minLayover = 3 * time.Hour
+	maxLayover = 6 * time.Hour
 )
 
 type Search struct {
@@ -35,7 +42,38 @@ func (s *Search) doSearch(req provider.Request) ([]Result, error) {
 	// then expand these to get the second legs of the journeys.
 	// then we need to combine these into valid one stop journeys.
 	// sort by price and return.
-	return nil, nil
+	basePrice, err := s.getBasePrice(req)
+	if err != nil {
+		return nil, err
+	}
+
+	exploreOr, exploreDest, err := s.explore(req)
+	if err != nil {
+		return nil, err
+	}
+
+	exploreOr = s.filterReasonableItineraries(exploreOr, basePrice)
+	exploreDest = s.filterReasonableItineraries(exploreDest, basePrice)
+
+	itineriesOrigin, err := s.expandFirstLegs(req, exploreOr)
+	if err != nil {
+		return nil, err
+	}
+
+	itineriesDest, err := s.expandFirstLegs(req, exploreDest)
+	if err != nil {
+		return nil, err
+	}
+
+	secondOr, secondDest, err := s.expandSecondLegs(req, exploreOr, exploreDest)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.combineItineraries(
+		itineriesOrigin, secondOr,
+		itineriesDest, secondDest,
+	)
 }
 
 func (s *Search) explore(req provider.Request) ([]itinery.ExploreItinery, []itinery.ExploreItinery, error) {
@@ -205,4 +243,46 @@ func (s *Search) expandSecondLegs(
 	wg.Wait()
 
 	return itineriesOrigin, itineriesDest, expandErr
+}
+
+func (s *Search) filterReasonableItineraries(
+	itineries []itinery.ExploreItinery,
+	basePrice float64,
+) []itinery.ExploreItinery {
+	reasonableItineries := make([]itinery.ExploreItinery, 0)
+	for _, itin := range itineries {
+		if itin.Price > basePrice*0.8 {
+			continue
+		}
+		reasonableItineries = append(reasonableItineries, itin)
+	}
+	return reasonableItineries
+}
+
+func (s *Search) combineItineraries(
+	firstOr, secondOr, firstDest, secondDest [][]itinery.Itinery,
+) ([]Result, error) {
+	// we want to combine the first and second legs of the itineraries to get valid one stop journeys.
+	// we can do this by iterating over the first legs and then finding the matching second legs.
+	// we can then calculate the total price and duration of the journey and sort by price.
+
+	orStop := combine.ConstructStop(firstOr, secondOr)
+	destStop := combine.ConstructStop(firstDest, secondDest)
+
+	results := []Result{}
+	for _, stop := range orStop {
+		res := combine.OneStop(stop[0], stop[1], minLayover, maxLayover)
+		for _, r := range res {
+			results = append(results, NewResult(r.First, r.Second))
+		}
+	}
+	for _, stop := range destStop {
+		res := combine.OneStop(stop[0], stop[1], minLayover, maxLayover)
+		for _, r := range res {
+			results = append(results, NewResult(r.First, r.Second))
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool { return results[i].Price < results[j].Price })
+	return results, nil
 }

@@ -38,3 +38,29 @@ func OneStop(
 
 	return results
 }
+
+func ConstructStop(first, second [][]itinery.Itinery) map[string][2][]itinery.Itinery {
+	// this is a helper function to construct the stop map for the one stop search.
+	stopMap := make(map[string][2][]itinery.Itinery)
+
+	for _, f := range first {
+		stopMap[f[0].Outbound.ArrivalAirport] = [2][]itinery.Itinery{
+			f, nil,
+		}
+	}
+
+	for _, s := range second {
+		if existing, ok := stopMap[s[0].Outbound.DepartureAirport]; ok {
+			existing[1] = s
+			stopMap[s[0].Outbound.DepartureAirport] = existing
+		}
+	}
+
+	for key, value := range stopMap {
+		if value[0] == nil || value[1] == nil {
+			delete(stopMap, key)
+		}
+	}
+
+	return stopMap
+}
