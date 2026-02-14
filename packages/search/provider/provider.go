@@ -1,5 +1,7 @@
 package provider
 
+//go:generate counterfeiter -o providerfakes/fake_provider.go . Provider
+
 import (
 	"context"
 
@@ -16,4 +18,5 @@ type Provider interface {
 		ctx context.Context,
 		req Request,
 	) ([]itinery.Itinery, error)
+	SortByPrice(itineries *[]itinery.Itinery)
 }
