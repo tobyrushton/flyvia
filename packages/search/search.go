@@ -142,3 +142,67 @@ func (s *Search) expandFirstLegs(req provider.Request, exploreItineries []itiner
 
 	return itineries, expandErr
 }
+
+func (s *Search) expandSecondLegs(
+	req provider.Request,
+	exploreOr []itinery.ExploreItinery,
+	exploreDest []itinery.ExploreItinery,
+) ([][]itinery.Itinery, [][]itinery.Itinery, error) {
+
+	// we want to expand the second legs of the explore itineraries to get actual flight offers with prices.
+	// we can do this in parallel and then sort by price.
+
+	wg := sync.WaitGroup{}
+	itineriesOrigin := make([][]itinery.Itinery, len(exploreOr))
+	itineriesDest := make([][]itinery.Itinery, len(exploreDest))
+	var expandErr error
+
+	for i, exploreItinery := range exploreOr {
+		wg.Add(1)
+		go func(i int, exploreItinery itinery.ExploreItinery) {
+			defer wg.Done()
+			it, err := s.p.Search(s.ctx, provider.Request{
+				Origin:        exploreItinery.Destination,
+				Destination:   req.Destination,
+				DepartureDate: req.DepartureDate,
+				ReturnDate:    req.ReturnDate,
+				Adults:        req.Adults,
+				Children:      req.Children,
+				Class:         req.Class,
+				Currency:      req.Currency,
+			})
+			if err != nil {
+				expandErr = err
+				return
+			}
+			sort.Slice(it, func(i, j int) bool { return it[i].Price < it[j].Price })
+			itineriesOrigin[i] = it
+		}(i, exploreItinery)
+	}
+
+	for i, exploreItinery := range exploreDest {
+		wg.Add(1)
+		go func(i int, exploreItinery itinery.ExploreItinery) {
+			defer wg.Done()
+			it, err := s.p.Search(s.ctx, provider.Request{
+				Origin:        req.Origin,
+				Destination:   exploreItinery.Destination,
+				DepartureDate: req.DepartureDate,
+				ReturnDate:    req.ReturnDate,
+				Adults:        req.Adults,
+				Children:      req.Children,
+				Class:         req.Class,
+				Currency:      req.Currency,
+			})
+			if err != nil {
+				expandErr = err
+				return
+			}
+			sort.Slice(it, func(i, j int) bool { return it[i].Price < it[j].Price })
+			itineriesDest[i] = it
+		}(i, exploreItinery)
+	}
+	wg.Wait()
+
+	return itineriesOrigin, itineriesDest, expandErr
+}
