@@ -108,3 +108,37 @@ func (s *Search) getBasePrice(req provider.Request) (float64, error) {
 
 	return basePrice, nil
 }
+
+func (s *Search) expandFirstLegs(req provider.Request, exploreItineries []itinery.ExploreItinery) ([][]itinery.Itinery, error) {
+	// we want to expand the first legs of the explore itineries to get actual flight offers with prices.
+	// we can do this in parallel and then sort by price.
+	wg := sync.WaitGroup{}
+	itineries := make([][]itinery.Itinery, len(exploreItineries))
+	var expandErr error
+
+	for i, exploreItinery := range exploreItineries {
+		wg.Add(1)
+		go func(i int, exploreItinery itinery.ExploreItinery) {
+			defer wg.Done()
+			it, err := s.p.Search(s.ctx, provider.Request{
+				Origin:        req.Origin,
+				Destination:   exploreItinery.Destination,
+				DepartureDate: req.DepartureDate,
+				ReturnDate:    req.ReturnDate,
+				Adults:        req.Adults,
+				Children:      req.Children,
+				Class:         req.Class,
+				Currency:      req.Currency,
+			})
+			if err != nil {
+				expandErr = err
+				return
+			}
+			sort.Slice(it, func(i, j int) bool { return it[i].Price < it[j].Price })
+			itineries[i] = it
+		}(i, exploreItinery)
+	}
+	wg.Wait()
+
+	return itineries, expandErr
+}
