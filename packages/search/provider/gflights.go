@@ -16,8 +16,15 @@ type GFlights struct {
 	s *gflights.Session
 }
 
-func NewGFlights() (*GFlights, error) {
-	s, err := gflights.New()
+func NewGFlights(proxy string) (*GFlights, error) {
+	client, err := NewBrowserClient(BrowserClientOptions{
+		ProxyURL: proxy,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	s, err := gflights.New(gflights.WithClient(client))
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +102,9 @@ func (g *GFlights) Search(
 	if err != nil {
 		return nil, err
 	}
+	if len(outboundFlights) == 0 {
+		return nil, nil
+	}
 
 	// sort outboundFlights and lets choose top x
 	sort.Slice(outboundFlights, func(i, j int) bool {
@@ -105,7 +115,7 @@ func (g *GFlights) Search(
 	wg := sync.WaitGroup{}
 	legsMu := sync.Mutex{}
 
-	capPrice := outboundFlights[5].Price
+	capPrice := outboundFlights[0].Price * 1.5
 
 	for i := 0; i < 5 && i < len(outboundFlights); i++ {
 		wg.Add(1)
@@ -118,7 +128,7 @@ func (g *GFlights) Search(
 			}
 
 			for _, rf := range returnFlights {
-				if rf.Price <= capPrice {
+				if rf.Price > 0 && rf.Price <= capPrice {
 					t, err := of.SelectReturnFlight(rf)
 					if err != nil {
 						fmt.Println("Error selecting return flight:", err)
@@ -130,16 +140,23 @@ func (g *GFlights) Search(
 						continue
 					}
 
+					if len(of.Flight) == 0 {
+						fmt.Println("Error: outbound offer has no flight legs")
+						continue
+					}
+					outboundDep := of.Flight[0].DepTime
+					outboundArr := of.Flight[len(of.Flight)-1].ArrTime
+
 					legsMu.Lock()
 					itineries = append(itineries, itinery.Itinery{
 						Outbound: leg.Leg{
 							DepartureAirport: of.SrcAirportCode,
 							ArrivalAirport:   of.DstAirportCode,
-							DepartureTime:    of.DepartureDate,
-							ArrivalTime:      of.ReturnDate,
+							DepartureTime:    outboundDep,
+							ArrivalTime:      outboundArr,
 							Stops:            len(of.Flight) - 1,
 							Flights:          gflightsFlightsToLegFlights(of.Flight),
-							Duration:         of.ReturnDate.Sub(of.DepartureDate),
+							Duration:         outboundArr.Sub(outboundDep),
 						},
 						Inbound: leg.Leg{
 							DepartureAirport: rf.Flight[0].DepAirportCode,

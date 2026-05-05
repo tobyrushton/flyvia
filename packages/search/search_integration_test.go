@@ -2,20 +2,29 @@ package search_test
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"golang.org/x/text/currency"
 
+	"github.com/tobyrushton/flyvia/packages/env"
 	"github.com/tobyrushton/flyvia/packages/search"
 	"github.com/tobyrushton/flyvia/packages/search/provider"
 )
 
 // newGFlightsProvider creates a real GFlights provider, skipping the test if
-// session creation fails (e.g. network down, rate-limited).
+// env loading or session creation fails (e.g. missing .env, network down, rate-limited).
 func newGFlightsProvider(t *testing.T) *provider.GFlights {
 	t.Helper()
-	p, err := provider.NewGFlights()
+
+	cfg, err := env.Load("../../.env")
+	if err != nil {
+		t.Skipf("skipping integration test: could not load env: %v", err)
+	}
+	p, err := provider.NewGFlights(cfg.ProxyURL)
 	if err != nil {
 		t.Skipf("skipping integration test: could not create GFlights session: %v", err)
 	}
@@ -32,7 +41,7 @@ func futureDate(days int) time.Time {
 
 // --- Full end-to-end search integration tests ---
 
-func TestIntegration_Search_LondonToNewYork(t *testing.T) {
+func TestIntegration_Search_LondonToPhnomPenh(t *testing.T) {
 	p := newGFlightsProvider(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -42,7 +51,7 @@ func TestIntegration_Search_LondonToNewYork(t *testing.T) {
 
 	results, err := s.Search(provider.Request{
 		Origin:        "london",
-		Destination:   "new york",
+		Destination:   "tokyo",
 		DepartureDate: futureDate(30),
 		ReturnDate:    futureDate(37),
 		Adults:        1,
@@ -53,7 +62,11 @@ func TestIntegration_Search_LondonToNewYork(t *testing.T) {
 		t.Fatalf("Search returned error: %v", err)
 	}
 
-	t.Logf("found %d split-ticket results for London → New York", len(results))
+	if err := writeResultsJSON("london_to_hanoi", results); err != nil {
+		t.Fatalf("failed to write results json: %v", err)
+	}
+
+	t.Logf("found %d split-ticket results for London → Hanoi", len(results))
 
 	for i, r := range results {
 		if r.Price <= 0 {
@@ -77,6 +90,30 @@ func TestIntegration_Search_LondonToNewYork(t *testing.T) {
 				i-1, results[i-1].Price, i, results[i].Price)
 		}
 	}
+}
+
+func writeResultsJSON(name string, results []search.Result) error {
+	if err := os.MkdirAll("testdata", 0o755); err != nil {
+		return err
+	}
+
+	payload := struct {
+		GeneratedAt time.Time       `json:"generated_at"`
+		Count       int             `json:"count"`
+		Results     []search.Result `json:"results"`
+	}{
+		GeneratedAt: time.Now().UTC(),
+		Count:       len(results),
+		Results:     results,
+	}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join("testdata", name+"_results.json")
+	return os.WriteFile(path, data, 0o644)
 }
 
 func TestIntegration_Search_ShortHaulRoute(t *testing.T) {

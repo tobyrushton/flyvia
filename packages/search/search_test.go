@@ -243,44 +243,21 @@ func TestSearch_FilterReasonableItineraries_AllFiltered(t *testing.T) {
 	}
 }
 
-func TestSearch_ExpandFirstLegsError(t *testing.T) {
+func TestSearch_SecondLegUsesFirstArrivalTime(t *testing.T) {
 	req := defaultRequest()
-	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 500.0)
-	fake := setupFake(
-		map[searchKey][]itinery.Itinery{
-			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
-		},
-		map[searchKey]error{
-			{Origin: "LHR", Destination: "JFK"}: errors.New("expand first leg failed"),
-		},
-		map[exploreKey][]itinery.ExploreItinery{
-			{Origin: req.Destination}: {{Destination: "JFK", Price: 50.0}},
-			{Origin: req.Origin}:      {},
-		},
-		nil,
-	)
-
-	s := New(context.Background(), fake)
-	_, err := s.Search(req)
-
-	if err == nil {
-		t.Fatal("expected error from expand first legs")
+	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 2000.0)
+	firstLeg := itinery.Itinery{
+		Outbound: makeLeg("LHR", "JFK", baseTime, baseTime.Add(8*time.Hour), 0),
+		Inbound:  makeLeg("JFK", "LHR", baseTime.Add(7*24*time.Hour), baseTime.Add(7*24*time.Hour+8*time.Hour), 0),
+		Price:    300.0,
 	}
-}
-
-func TestSearch_ExpandSecondLegsError(t *testing.T) {
-	req := defaultRequest()
-	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 500.0)
 	fake := setupFake(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
-			{Origin: "LHR", Destination: "JFK"}: {
-				makeItin("LHR", "JFK", baseTime, baseTime.Add(8*time.Hour), 200.0),
-			},
+			{Origin: "LHR", Destination: "JFK"}:                {firstLeg},
+			{Origin: "JFK", Destination: "LAX"}:                {},
 		},
-		map[searchKey]error{
-			{Origin: "JFK", Destination: "LAX"}: errors.New("expand second leg failed"),
-		},
+		nil,
 		map[exploreKey][]itinery.ExploreItinery{
 			{Origin: req.Destination}: {{Destination: "JFK", Price: 50.0}},
 			{Origin: req.Origin}:      {},
@@ -291,8 +268,23 @@ func TestSearch_ExpandSecondLegsError(t *testing.T) {
 	s := New(context.Background(), fake)
 	_, err := s.Search(req)
 
-	if err == nil {
-		t.Fatal("expected error from expand second legs")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := baseTime.Add(8 * time.Hour)
+	found := false
+	for i := 0; i < fake.SearchCallCount(); i++ {
+		_, gotReq := fake.SearchArgsForCall(i)
+		if gotReq.Origin == "JFK" && gotReq.Destination == "LAX" {
+			found = true
+			if !gotReq.DepartureDate.Equal(expected) {
+				t.Fatalf("expected second leg departure %v, got %v", expected, gotReq.DepartureDate)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected second leg search call for JFK -> LAX")
 	}
 }
 
@@ -874,134 +866,6 @@ func TestExplore_EmptyResults(t *testing.T) {
 	}
 	if len(exploreDest) != 0 {
 		t.Errorf("expected 0 dest explore results, got %d", len(exploreDest))
-	}
-}
-
-// --- expandFirstLegs tests ---
-
-func TestExpandFirstLegs_Success(t *testing.T) {
-	req := defaultRequest()
-	exploreItins := []itinery.ExploreItinery{
-		{Destination: "JFK", Price: 100.0},
-		{Destination: "CDG", Price: 150.0},
-	}
-	fake := setupFake(
-		map[searchKey][]itinery.Itinery{
-			{Origin: "LHR", Destination: "JFK"}: {
-				makeItin("LHR", "JFK", baseTime, baseTime.Add(8*time.Hour), 400.0),
-				makeItin("LHR", "JFK", baseTime.Add(2*time.Hour), baseTime.Add(10*time.Hour), 300.0),
-			},
-			{Origin: "LHR", Destination: "CDG"}: {
-				makeItin("LHR", "CDG", baseTime, baseTime.Add(1*time.Hour), 100.0),
-			},
-		},
-		nil, nil, nil,
-	)
-
-	s := New(context.Background(), fake)
-	result, err := s.expandFirstLegs(req, exploreItins)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(result))
-	}
-	if len(result[0]) == 2 && result[0][0].Price > result[0][1].Price {
-		t.Error("JFK results not sorted by price")
-	}
-}
-
-func TestExpandFirstLegs_Error(t *testing.T) {
-	req := defaultRequest()
-	exploreItins := []itinery.ExploreItinery{
-		{Destination: "JFK", Price: 100.0},
-	}
-	fake := setupFake(
-		nil,
-		map[searchKey]error{
-			{Origin: "LHR", Destination: "JFK"}: errors.New("search failed"),
-		},
-		nil, nil,
-	)
-
-	s := New(context.Background(), fake)
-	_, err := s.expandFirstLegs(req, exploreItins)
-
-	if err == nil {
-		t.Fatal("expected error from expandFirstLegs")
-	}
-}
-
-func TestExpandFirstLegs_Empty(t *testing.T) {
-	fake := setupFake(nil, nil, nil, nil)
-	req := defaultRequest()
-
-	s := New(context.Background(), fake)
-	result, err := s.expandFirstLegs(req, []itinery.ExploreItinery{})
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result) != 0 {
-		t.Errorf("expected 0 groups, got %d", len(result))
-	}
-}
-
-// --- expandSecondLegs tests ---
-
-func TestExpandSecondLegs_Success(t *testing.T) {
-	req := defaultRequest()
-	exploreOr := []itinery.ExploreItinery{
-		{Destination: "JFK", Price: 100.0},
-	}
-	exploreDest := []itinery.ExploreItinery{
-		{Destination: "DUB", Price: 50.0},
-	}
-	fake := setupFake(
-		map[searchKey][]itinery.Itinery{
-			{Origin: "JFK", Destination: "LAX"}: {
-				makeItin("JFK", "LAX", baseTime.Add(12*time.Hour), baseTime.Add(17*time.Hour), 200.0),
-			},
-			{Origin: "LHR", Destination: "DUB"}: {
-				makeItin("LHR", "DUB", baseTime, baseTime.Add(1*time.Hour), 80.0),
-			},
-		},
-		nil, nil, nil,
-	)
-
-	s := New(context.Background(), fake)
-	secondOr, secondDest, err := s.expandSecondLegs(req, exploreOr, exploreDest)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(secondOr) != 1 {
-		t.Errorf("expected 1 secondOr group, got %d", len(secondOr))
-	}
-	if len(secondDest) != 1 {
-		t.Errorf("expected 1 secondDest group, got %d", len(secondDest))
-	}
-}
-
-func TestExpandSecondLegs_Error(t *testing.T) {
-	req := defaultRequest()
-	exploreOr := []itinery.ExploreItinery{
-		{Destination: "JFK", Price: 100.0},
-	}
-	fake := setupFake(
-		nil,
-		map[searchKey]error{
-			{Origin: "JFK", Destination: "LAX"}: errors.New("second leg failed"),
-		},
-		nil, nil,
-	)
-
-	s := New(context.Background(), fake)
-	_, _, err := s.expandSecondLegs(req, exploreOr, []itinery.ExploreItinery{})
-
-	if err == nil {
-		t.Fatal("expected error from expandSecondLegs")
 	}
 }
 

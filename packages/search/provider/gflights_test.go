@@ -5,12 +5,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tobyrushton/flyvia/packages/env"
 	"github.com/tobyrushton/flyvia/packages/search/provider"
 	"golang.org/x/text/currency"
 )
 
 func TestGFlightsSearch(t *testing.T) {
-	p, err := provider.NewGFlights()
+	cfg, err := env.Load("../../../.env")
+	if err != nil {
+		t.Skipf("skipping: could not load env: %v", err)
+	}
+	p, err := provider.NewGFlights(cfg.ProxyURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +42,11 @@ func TestGFlightsSearch(t *testing.T) {
 }
 
 func TestGFlightsExplore(t *testing.T) {
-	p, err := provider.NewGFlights()
+	cfg, err := env.Load("../../../.env")
+	if err != nil {
+		t.Skipf("skipping: could not load env: %v", err)
+	}
+	p, err := provider.NewGFlights(cfg.ProxyURL)
 	if err != nil {
 		t.Fatal(err)
 	}

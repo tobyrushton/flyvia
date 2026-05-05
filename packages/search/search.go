@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -46,33 +47,31 @@ func (s *Search) doSearch(req provider.Request) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	fmt.Println("found base price")
+	fmt.Printf("got: %f\n", basePrice)
 	exploreOr, exploreDest, err := s.explore(req)
 	if err != nil {
 		return nil, err
 	}
-
+	fmt.Println("found explore dests")
 	exploreOr = s.filterReasonableItineraries(exploreOr, basePrice)
 	exploreDest = s.filterReasonableItineraries(exploreDest, basePrice)
 
-	itineriesOrigin, err := s.expandFirstLegs(req, exploreOr)
+	firstOr, secondOr, err := s.expandOneStopLegs(req, exploreOr, req.Origin, req.Destination)
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println("expanded origin stop legs")
 
-	itineriesDest, err := s.expandFirstLegs(req, exploreDest)
+	firstDest, secondDest, err := s.expandOneStopLegs(req, exploreDest, req.Origin, req.Destination)
 	if err != nil {
 		return nil, err
 	}
-
-	secondOr, secondDest, err := s.expandSecondLegs(req, exploreOr, exploreDest)
-	if err != nil {
-		return nil, err
-	}
+	fmt.Println("expanded destination stop legs")
 
 	return s.combineItineraries(
-		itineriesOrigin, secondOr,
-		itineriesDest, secondDest,
+		firstOr, secondOr,
+		firstDest, secondDest,
 	)
 }
 
@@ -136,6 +135,7 @@ func (s *Search) getBasePrice(req provider.Request) (float64, error) {
 	// durationScore: 0 → instant, 0.5 → 6hrs, 0.67 → 12hrs, 0.8 → 24hrs
 	// stopsScore:    0 → direct, 0.5 → 1 stop, 0.67 → 2 stops
 	cheapestPrice := offers[0].Price
+	// fmt.Printf("cheapest price: %+v\n", offers[0])
 
 	durationScore := avgDuration.Hours() / (avgDuration.Hours() + 6.0)
 	stopsScore := avgStops / (avgStops + 1.0)
@@ -147,20 +147,27 @@ func (s *Search) getBasePrice(req provider.Request) (float64, error) {
 	return basePrice, nil
 }
 
-func (s *Search) expandFirstLegs(req provider.Request, exploreItineries []itinery.ExploreItinery) ([][]itinery.Itinery, error) {
-	// we want to expand the first legs of the explore itineries to get actual flight offers with prices.
-	// we can do this in parallel and then sort by price.
+func (s *Search) expandOneStopLegs(
+	req provider.Request,
+	exploreItineries []itinery.ExploreItinery,
+	firstOrigin string,
+	finalDestination string,
+) ([][]itinery.Itinery, [][]itinery.Itinery, error) {
+	// expand first-leg offers, then expand second-leg offers using the earliest arrival as the outbound time.
 	wg := sync.WaitGroup{}
-	itineries := make([][]itinery.Itinery, len(exploreItineries))
-	var expandErr error
+	firstLegs := make([][]itinery.Itinery, 0)
+	secondLegs := make([][]itinery.Itinery, 0)
+	var firstMu sync.Mutex
+	var secondMu sync.Mutex
 
-	for i, exploreItinery := range exploreItineries {
+	for _, exploreItinery := range exploreItineries {
+		stop := exploreItinery.Destination
 		wg.Add(1)
-		go func(i int, exploreItinery itinery.ExploreItinery) {
+		go func(stop string) {
 			defer wg.Done()
-			it, err := s.p.Search(s.ctx, provider.Request{
-				Origin:        req.Origin,
-				Destination:   exploreItinery.Destination,
+			first, err := s.p.Search(s.ctx, provider.Request{
+				Origin:        firstOrigin,
+				Destination:   stop,
 				DepartureDate: req.DepartureDate,
 				ReturnDate:    req.ReturnDate,
 				Adults:        req.Adults,
@@ -169,80 +176,67 @@ func (s *Search) expandFirstLegs(req provider.Request, exploreItineries []itiner
 				Currency:      req.Currency,
 			})
 			if err != nil {
-				expandErr = err
+				s.logExpandError("first-legs", firstOrigin, stop, err)
 				return
 			}
-			sort.Slice(it, func(i, j int) bool { return it[i].Price < it[j].Price })
-			itineries[i] = it
-		}(i, exploreItinery)
+			if len(first) == 0 {
+				return
+			}
+			sort.Slice(first, func(i, j int) bool { return first[i].Price < first[j].Price })
+			firstMu.Lock()
+			firstLegs = append(firstLegs, first)
+			firstMu.Unlock()
+
+			outboundTime := earliestArrival(first)
+			if outboundTime.IsZero() {
+				outboundTime = req.DepartureDate
+			}
+			second, err := s.p.Search(s.ctx, provider.Request{
+				Origin:        stop,
+				Destination:   finalDestination,
+				DepartureDate: outboundTime,
+				ReturnDate:    req.ReturnDate,
+				Adults:        req.Adults,
+				Children:      req.Children,
+				Class:         req.Class,
+				Currency:      req.Currency,
+			})
+			if err != nil {
+				s.logExpandError("second-legs", stop, finalDestination, err)
+				return
+			}
+			if len(second) == 0 {
+				return
+			}
+			sort.Slice(second, func(i, j int) bool { return second[i].Price < second[j].Price })
+			secondMu.Lock()
+			secondLegs = append(secondLegs, second)
+			secondMu.Unlock()
+		}(stop)
 	}
 	wg.Wait()
 
-	return itineries, expandErr
+	return firstLegs, secondLegs, nil
 }
 
-func (s *Search) expandSecondLegs(
-	req provider.Request,
-	exploreOr []itinery.ExploreItinery,
-	exploreDest []itinery.ExploreItinery,
-) ([][]itinery.Itinery, [][]itinery.Itinery, error) {
-
-	// we want to expand the second legs of the explore itineraries to get actual flight offers with prices.
-	// we can do this in parallel and then sort by price.
-
-	wg := sync.WaitGroup{}
-	itineriesOrigin := make([][]itinery.Itinery, len(exploreOr))
-	itineriesDest := make([][]itinery.Itinery, len(exploreDest))
-	var expandErr error
-
-	for i, exploreItinery := range exploreOr {
-		wg.Add(1)
-		go func(i int, exploreItinery itinery.ExploreItinery) {
-			defer wg.Done()
-			it, err := s.p.Search(s.ctx, provider.Request{
-				Origin:        exploreItinery.Destination,
-				Destination:   req.Destination,
-				DepartureDate: req.DepartureDate,
-				ReturnDate:    req.ReturnDate,
-				Adults:        req.Adults,
-				Children:      req.Children,
-				Class:         req.Class,
-				Currency:      req.Currency,
-			})
-			if err != nil {
-				expandErr = err
-				return
-			}
-			sort.Slice(it, func(i, j int) bool { return it[i].Price < it[j].Price })
-			itineriesOrigin[i] = it
-		}(i, exploreItinery)
+func earliestArrival(itineries []itinery.Itinery) time.Time {
+	var earliest time.Time
+	for _, itin := range itineries {
+		if itin.Outbound.ArrivalTime.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || itin.Outbound.ArrivalTime.Before(earliest) {
+			earliest = itin.Outbound.ArrivalTime
+		}
 	}
+	return earliest
+}
 
-	for i, exploreItinery := range exploreDest {
-		wg.Add(1)
-		go func(i int, exploreItinery itinery.ExploreItinery) {
-			defer wg.Done()
-			it, err := s.p.Search(s.ctx, provider.Request{
-				Origin:        req.Origin,
-				Destination:   exploreItinery.Destination,
-				DepartureDate: req.DepartureDate,
-				ReturnDate:    req.ReturnDate,
-				Adults:        req.Adults,
-				Children:      req.Children,
-				Class:         req.Class,
-				Currency:      req.Currency,
-			})
-			if err != nil {
-				expandErr = err
-				return
-			}
-			sort.Slice(it, func(i, j int) bool { return it[i].Price < it[j].Price })
-			itineriesDest[i] = it
-		}(i, exploreItinery)
+func (s *Search) logExpandError(phase, origin, destination string, err error) {
+	if err == nil {
+		return
 	}
-	wg.Wait()
-
-	return itineriesOrigin, itineriesDest, expandErr
+	fmt.Printf("expand %s failed for %s -> %s: %v\n", phase, origin, destination, err)
 }
 
 func (s *Search) filterReasonableItineraries(
