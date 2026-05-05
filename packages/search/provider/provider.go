@@ -1,6 +1,6 @@
 package provider
 
-//go:generate counterfeiter -o providerfakes/fake_provider.go . Provider
+//go:generate counterfeiter -o ../../../testing/fakes/providerfakes/fake_provider.go . Provider
 
 import (
 	"context"

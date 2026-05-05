@@ -1,4 +1,7 @@
-package search_test
+//go:build integration
+// +build integration
+
+package integration_test
 
 import (
 	"context"

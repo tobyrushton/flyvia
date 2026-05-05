@@ -12,7 +12,7 @@ import (
 	"github.com/tobyrushton/flyvia/packages/search/itinery"
 	"github.com/tobyrushton/flyvia/packages/search/leg"
 	"github.com/tobyrushton/flyvia/packages/search/provider"
-	"github.com/tobyrushton/flyvia/packages/search/provider/providerfakes"
+	"github.com/tobyrushton/flyvia/testing/fakes/providerfakes"
 )
 
 // --- Helpers ---
