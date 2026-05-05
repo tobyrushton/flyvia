@@ -9,14 +9,22 @@ import (
 	"github.com/tobyrushton/flyvia/packages/search/itinery"
 	"github.com/tobyrushton/flyvia/packages/search/leg"
 	"github.com/tobyrushton/gflights"
+	"github.com/tobyrushton/gflights/iata"
 )
 
 type GFlights struct {
 	s *gflights.Session
 }
 
-func NewGFlights() (*GFlights, error) {
-	s, err := gflights.New()
+func NewGFlights(proxy string) (*GFlights, error) {
+	client, err := NewBrowserClient(BrowserClientOptions{
+		ProxyURL: proxy,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	s, err := gflights.New(gflights.WithClient(client))
 	if err != nil {
 		return nil, err
 	}
@@ -31,10 +39,13 @@ func (g *GFlights) Explore(
 	req Request,
 	origin string,
 ) ([]itinery.ExploreItinery, error) {
+	srcCities, srcAirports := g.sortLocations([]string{origin})
+
 	offers, err := g.s.GetExplore(ctx, gflights.ExploreArgs{
 		DepartureDate: req.DepartureDate,
 		ReturnDate:    req.ReturnDate,
-		SrcCities:     []string{origin},
+		SrcCities:     srcCities,
+		SrcAirports:   srcAirports,
 		Options: gflights.Options{
 			Travelers: gflights.Travelers{
 				Adults:   req.Adults,
@@ -67,11 +78,16 @@ func (g *GFlights) Search(
 	ctx context.Context,
 	req Request,
 ) ([]itinery.Itinery, error) {
+	srcCities, srcAirports := g.sortLocations([]string{req.Origin})
+	dstCities, dstAirports := g.sortLocations([]string{req.Destination})
+
 	outboundFlights, _, err := g.s.GetOutboundOffers(ctx, gflights.Args{
 		DepartureDate: req.DepartureDate,
 		ReturnDate:    req.ReturnDate,
-		SrcCities:     []string{req.Origin},
-		DstCities:     []string{req.Destination},
+		SrcCities:     srcCities,
+		SrcAirports:   srcAirports,
+		DstCities:     dstCities,
+		DstAirports:   dstAirports,
 		Options: gflights.Options{
 			Travelers: gflights.Travelers{
 				Adults:   req.Adults,
@@ -86,6 +102,9 @@ func (g *GFlights) Search(
 	if err != nil {
 		return nil, err
 	}
+	if len(outboundFlights) == 0 {
+		return nil, nil
+	}
 
 	// sort outboundFlights and lets choose top x
 	sort.Slice(outboundFlights, func(i, j int) bool {
@@ -96,7 +115,7 @@ func (g *GFlights) Search(
 	wg := sync.WaitGroup{}
 	legsMu := sync.Mutex{}
 
-	capPrice := outboundFlights[5].Price
+	capPrice := outboundFlights[0].Price * 1.5
 
 	for i := 0; i < 5 && i < len(outboundFlights); i++ {
 		wg.Add(1)
@@ -109,7 +128,7 @@ func (g *GFlights) Search(
 			}
 
 			for _, rf := range returnFlights {
-				if rf.Price <= capPrice {
+				if rf.Price > 0 && rf.Price <= capPrice {
 					t, err := of.SelectReturnFlight(rf)
 					if err != nil {
 						fmt.Println("Error selecting return flight:", err)
@@ -121,15 +140,23 @@ func (g *GFlights) Search(
 						continue
 					}
 
+					if len(of.Flight) == 0 {
+						fmt.Println("Error: outbound offer has no flight legs")
+						continue
+					}
+					outboundDep := of.Flight[0].DepTime
+					outboundArr := of.Flight[len(of.Flight)-1].ArrTime
+
 					legsMu.Lock()
 					itineries = append(itineries, itinery.Itinery{
 						Outbound: leg.Leg{
 							DepartureAirport: of.SrcAirportCode,
 							ArrivalAirport:   of.DstAirportCode,
-							DepartureTime:    of.DepartureDate,
-							ArrivalTime:      of.ReturnDate,
+							DepartureTime:    outboundDep,
+							ArrivalTime:      outboundArr,
 							Stops:            len(of.Flight) - 1,
 							Flights:          gflightsFlightsToLegFlights(of.Flight),
+							Duration:         outboundArr.Sub(outboundDep),
 						},
 						Inbound: leg.Leg{
 							DepartureAirport: rf.Flight[0].DepAirportCode,
@@ -138,6 +165,7 @@ func (g *GFlights) Search(
 							ArrivalTime:      rf.Flight[len(rf.Flight)-1].ArrTime,
 							Stops:            len(rf.Flight) - 1,
 							Flights:          gflightsFlightsToLegFlights(rf.Flight),
+							Duration:         rf.Flight[len(rf.Flight)-1].ArrTime.Sub(rf.Flight[0].DepTime),
 						},
 						Price:      rf.Price,
 						BookingURL: url,
@@ -152,6 +180,27 @@ func (g *GFlights) Search(
 	wg.Wait()
 
 	return itineries, nil
+}
+
+func (g *GFlights) SortByPrice(itins *[]itinery.Itinery) {
+	sort.Slice(*itins, func(i, j int) bool {
+		return (*itins)[i].Price < (*itins)[j].Price
+	})
+}
+
+func (g *GFlights) sortLocations(locations []string) ([]string, []string) {
+	cities := make([]string, 0)
+	airports := make([]string, 0)
+
+	for _, loc := range locations {
+		tz := iata.IATATimeZone(loc)
+		if tz.City == "Not supported IATA Code" {
+			cities = append(cities, loc)
+		} else {
+			airports = append(airports, loc)
+		}
+	}
+	return cities, airports
 }
 
 func gflightsFlightToLegFlight(gf gflights.Flight) leg.Flight {

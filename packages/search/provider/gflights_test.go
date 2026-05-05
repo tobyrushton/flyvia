@@ -1,28 +1,34 @@
-package provider
+package provider_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/tobyrushton/flyvia/packages/env"
+	"github.com/tobyrushton/flyvia/packages/search/provider"
 	"golang.org/x/text/currency"
 )
 
 func TestGFlightsSearch(t *testing.T) {
-	provider, err := NewGFlights()
+	cfg, err := env.Load("../../../.env")
+	if err != nil {
+		t.Skipf("skipping: could not load env: %v", err)
+	}
+	p, err := provider.NewGFlights(cfg.ProxyURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	itineries, err := provider.Search(
+	itineries, err := p.Search(
 		context.Background(),
-		Request{
+		provider.Request{
 			Origin:        "LONDON",
 			Destination:   "NEW YORK",
 			DepartureDate: time.Now().Add(time.Hour * 24),
 			ReturnDate:    time.Now().Add(time.Hour * 24 * 7),
 			Adults:        1,
-			Class:         Economy,
+			Class:         provider.Economy,
 			Currency:      currency.GBP,
 		},
 	)
@@ -36,19 +42,23 @@ func TestGFlightsSearch(t *testing.T) {
 }
 
 func TestGFlightsExplore(t *testing.T) {
-	provider, err := NewGFlights()
+	cfg, err := env.Load("../../../.env")
+	if err != nil {
+		t.Skipf("skipping: could not load env: %v", err)
+	}
+	p, err := provider.NewGFlights(cfg.ProxyURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	itineries, err := provider.Explore(
+	itineries, err := p.Explore(
 		context.Background(),
-		Request{
+		provider.Request{
 			Origin:        "LONDON",
 			DepartureDate: time.Now().Add(time.Hour * 24),
 			ReturnDate:    time.Now().Add(time.Hour * 24 * 7),
 			Adults:        1,
-			Class:         Economy,
+			Class:         provider.Economy,
 			Currency:      currency.GBP,
 		},
 		"London",

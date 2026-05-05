@@ -25,6 +25,6 @@ type Request struct {
 	Adults   int
 	Children int
 
-	Currency currency.Unit
 	Class    Class
+	Currency currency.Unit
 }
