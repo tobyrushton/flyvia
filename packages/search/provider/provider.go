@@ -18,5 +18,9 @@ type Provider interface {
 		ctx context.Context,
 		req Request,
 	) ([]itinery.Itinery, error)
+	GetPriceCalendar(
+		ctx context.Context,
+		req Request,
+	) ([][]float64, error)
 	SortByPrice(itineries *[]itinery.Itinery)
 }

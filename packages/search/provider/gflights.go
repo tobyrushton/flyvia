@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/tobyrushton/flyvia/packages/search/itinery"
 	"github.com/tobyrushton/flyvia/packages/search/leg"
@@ -186,6 +187,79 @@ func (g *GFlights) SortByPrice(itins *[]itinery.Itinery) {
 	sort.Slice(*itins, func(i, j int) bool {
 		return (*itins)[i].Price < (*itins)[j].Price
 	})
+}
+
+func (g *GFlights) GetPriceCalendar(
+	ctx context.Context,
+	req Request,
+) ([][]float64, error) {
+	normalizeDay := func(t time.Time) time.Time {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	}
+
+	srcCities, srcAirports := g.sortLocations([]string{req.Origin})
+	dstCities, dstAirports := g.sortLocations([]string{req.Destination})
+
+	startDepart := normalizeDay(req.DepartureDate)
+	endDepart := normalizeDay(req.ReturnDate)
+	startReturn := normalizeDay(req.DepartureDate)
+	endReturn := normalizeDay(req.ReturnDate)
+
+	offers, err := g.s.GetPriceGrid(
+		ctx,
+		gflights.PriceGridArgs{
+			StartDepartureRange: startDepart,
+			EndDepartureRange:   endDepart,
+			StartReturnRange:    startReturn,
+			EndReturnRange:      endReturn,
+			SrcCities:           srcCities,
+			SrcAirports:         srcAirports,
+			DstCities:           dstCities,
+			DstAirports:         dstAirports,
+			Options: gflights.Options{
+				Travelers: gflights.Travelers{
+					Adults:   req.Adults,
+					Children: req.Children,
+				},
+				Class:    gflights.Class(req.Class),
+				Currency: req.Currency,
+				TripType: gflights.RoundTrip,
+				Stops:    gflights.AnyStops,
+			},
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	depDays := int(endDepart.Sub(startDepart).Hours()/24) + 1
+	retDays := int(endReturn.Sub(startReturn).Hours()/24) + 1
+	if depDays <= 0 || retDays <= 0 {
+		return [][]float64{}, nil
+	}
+
+	grid := make([][]float64, depDays)
+	for i := range grid {
+		grid[i] = make([]float64, retDays)
+	}
+
+	for _, offer := range offers {
+		if offer.Price <= 0 {
+			continue
+		}
+		dep := normalizeDay(offer.DepartureDate)
+		ret := normalizeDay(offer.ReturnDate)
+		row := int(dep.Sub(startDepart).Hours() / 24)
+		col := int(ret.Sub(startReturn).Hours() / 24)
+		if row < 0 || row >= depDays || col < 0 || col >= retDays {
+			continue
+		}
+		if grid[row][col] == 0 || offer.Price < grid[row][col] {
+			grid[row][col] = offer.Price
+		}
+	}
+
+	return grid, nil
 }
 
 func (g *GFlights) sortLocations(locations []string) ([]string, []string) {
