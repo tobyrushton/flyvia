@@ -42,6 +42,24 @@ func futureDate(days int) time.Time {
 		Add(12 * time.Hour)
 }
 
+func countResults(results map[string][]search.Result) int {
+	count := 0
+	for _, group := range results {
+		count += len(group)
+	}
+	return count
+}
+
+func firstResult(results map[string][]search.Result) (search.Result, bool) {
+	for _, group := range results {
+		if len(group) == 0 {
+			continue
+		}
+		return group[0], true
+	}
+	return search.Result{}, false
+}
+
 // --- Full end-to-end search integration tests ---
 
 func TestIntegration_Search_LondonToPhnomPenh(t *testing.T) {
@@ -69,44 +87,44 @@ func TestIntegration_Search_LondonToPhnomPenh(t *testing.T) {
 		t.Fatalf("failed to write results json: %v", err)
 	}
 
-	t.Logf("found %d split-ticket results for London → Hanoi", len(results))
+	t.Logf("found %d split-ticket results for London → Hanoi", countResults(results))
 
-	for i, r := range results {
-		if r.Price <= 0 {
-			t.Errorf("result[%d]: expected positive price, got %f", i, r.Price)
+	for stopCity, group := range results {
+		for i, r := range group {
+			if r.Price <= 0 {
+				t.Errorf("%s result[%d]: expected positive price, got %f", stopCity, i, r.Price)
+			}
+			if r.StopCity == "" {
+				t.Errorf("%s result[%d]: expected non-empty stop city", stopCity, i)
+			}
+			if len(r.Itineries) != 2 {
+				t.Errorf("%s result[%d]: expected 2 itinerary legs, got %d", stopCity, i, len(r.Itineries))
+			}
+			if len(r.StopLengths) != 2 {
+				t.Errorf("%s result[%d]: expected 2 stop lengths, got %d", stopCity, i, len(r.StopLengths))
+			}
 		}
-		if r.StopCity == "" {
-			t.Errorf("result[%d]: expected non-empty stop city", i)
-		}
-		if len(r.Itineries) != 2 {
-			t.Errorf("result[%d]: expected 2 itinerary legs, got %d", i, len(r.Itineries))
-		}
-		if len(r.StopLengths) != 2 {
-			t.Errorf("result[%d]: expected 2 stop lengths, got %d", i, len(r.StopLengths))
-		}
-	}
-
-	// Results must be sorted by price if any exist
-	for i := 1; i < len(results); i++ {
-		if results[i].Price < results[i-1].Price {
-			t.Errorf("results not sorted by price: result[%d]=%f > result[%d]=%f",
-				i-1, results[i-1].Price, i, results[i].Price)
+		for i := 1; i < len(group); i++ {
+			if group[i].Price < group[i-1].Price {
+				t.Errorf("%s results not sorted by price: result[%d]=%f > result[%d]=%f",
+					stopCity, i-1, group[i-1].Price, i, group[i].Price)
+			}
 		}
 	}
 }
 
-func writeResultsJSON(name string, results []search.Result) error {
+func writeResultsJSON(name string, results map[string][]search.Result) error {
 	if err := os.MkdirAll("testdata", 0o755); err != nil {
 		return err
 	}
 
 	payload := struct {
-		GeneratedAt time.Time       `json:"generated_at"`
-		Count       int             `json:"count"`
-		Results     []search.Result `json:"results"`
+		GeneratedAt time.Time                  `json:"generated_at"`
+		Count       int                        `json:"count"`
+		Results     map[string][]search.Result `json:"results"`
 	}{
 		GeneratedAt: time.Now().UTC(),
-		Count:       len(results),
+		Count:       countResults(results),
 		Results:     results,
 	}
 
@@ -140,13 +158,15 @@ func TestIntegration_Search_ShortHaulRoute(t *testing.T) {
 		t.Fatalf("Search returned error: %v", err)
 	}
 
-	t.Logf("found %d split-ticket results for London → Paris", len(results))
+	t.Logf("found %d split-ticket results for London → Paris", countResults(results))
 
 	// Short haul is unlikely to benefit from split tickets — fewer or zero
 	// results is expected, but the search should still complete without error.
-	for i, r := range results {
-		if r.Price <= 0 {
-			t.Errorf("result[%d]: price must be positive, got %f", i, r.Price)
+	for stopCity, group := range results {
+		for i, r := range group {
+			if r.Price <= 0 {
+				t.Errorf("%s result[%d]: price must be positive, got %f", stopCity, i, r.Price)
+			}
 		}
 	}
 }
@@ -172,18 +192,20 @@ func TestIntegration_Search_LongHaulRoute(t *testing.T) {
 		t.Fatalf("Search returned error: %v", err)
 	}
 
-	t.Logf("found %d split-ticket results for London → Sydney", len(results))
+	t.Logf("found %d split-ticket results for London → Sydney", countResults(results))
 
-	for i, r := range results {
-		if r.Price <= 0 {
-			t.Errorf("result[%d]: expected positive price, got %f", i, r.Price)
-		}
-		if r.StopCity == "" {
-			t.Errorf("result[%d]: expected non-empty stop city", i)
-		}
-		// Every itinerary should have exactly two legs
-		if len(r.Itineries) != 2 {
-			t.Errorf("result[%d]: expected 2 legs, got %d", i, len(r.Itineries))
+	for stopCity, group := range results {
+		for i, r := range group {
+			if r.Price <= 0 {
+				t.Errorf("%s result[%d]: expected positive price, got %f", stopCity, i, r.Price)
+			}
+			if r.StopCity == "" {
+				t.Errorf("%s result[%d]: expected non-empty stop city", stopCity, i)
+			}
+			// Every itinerary should have exactly two legs
+			if len(r.Itineries) != 2 {
+				t.Errorf("%s result[%d]: expected 2 legs, got %d", stopCity, i, len(r.Itineries))
+			}
 		}
 	}
 }
@@ -210,11 +232,13 @@ func TestIntegration_Search_MultiplePassengers(t *testing.T) {
 		t.Fatalf("Search returned error: %v", err)
 	}
 
-	t.Logf("found %d split-ticket results for 2 adults + 1 child London → New York", len(results))
+	t.Logf("found %d split-ticket results for 2 adults + 1 child London → New York", countResults(results))
 
-	for i, r := range results {
-		if r.Price <= 0 {
-			t.Errorf("result[%d]: expected positive price, got %f", i, r.Price)
+	for stopCity, group := range results {
+		for i, r := range group {
+			if r.Price <= 0 {
+				t.Errorf("%s result[%d]: expected positive price, got %f", stopCity, i, r.Price)
+			}
 		}
 	}
 }
@@ -240,11 +264,13 @@ func TestIntegration_Search_BusinessClass(t *testing.T) {
 		t.Fatalf("Search returned error: %v", err)
 	}
 
-	t.Logf("found %d split-ticket results for business class London → New York", len(results))
+	t.Logf("found %d split-ticket results for business class London → New York", countResults(results))
 
-	for i, r := range results {
-		if r.Price <= 0 {
-			t.Errorf("result[%d]: expected positive price, got %f", i, r.Price)
+	for stopCity, group := range results {
+		for i, r := range group {
+			if r.Price <= 0 {
+				t.Errorf("%s result[%d]: expected positive price, got %f", stopCity, i, r.Price)
+			}
 		}
 	}
 }
@@ -270,11 +296,13 @@ func TestIntegration_Search_DifferentCurrency(t *testing.T) {
 		t.Fatalf("Search returned error: %v", err)
 	}
 
-	t.Logf("found %d split-ticket results (USD) for London → New York", len(results))
+	t.Logf("found %d split-ticket results (USD) for London → New York", countResults(results))
 
-	for i, r := range results {
-		if r.Price <= 0 {
-			t.Errorf("result[%d]: expected positive price, got %f", i, r.Price)
+	for stopCity, group := range results {
+		for i, r := range group {
+			if r.Price <= 0 {
+				t.Errorf("%s result[%d]: expected positive price, got %f", stopCity, i, r.Price)
+			}
 		}
 	}
 }
@@ -331,56 +359,58 @@ func TestIntegration_Search_ResultStructureValidation(t *testing.T) {
 		t.Fatalf("Search returned error: %v", err)
 	}
 
-	if len(results) == 0 {
+	if countResults(results) == 0 {
 		t.Skip("no results returned — cannot validate structure")
 	}
 
-	for i, r := range results {
-		// Validate price is sum of two legs
-		expectedPrice := r.Itineries[0].Price + r.Itineries[1].Price
-		if r.Price != expectedPrice {
-			t.Errorf("result[%d]: price %f != leg1(%f) + leg2(%f) = %f",
-				i, r.Price, r.Itineries[0].Price, r.Itineries[1].Price, expectedPrice)
-		}
-
-		// Stop city should match the connection point
-		leg1Arr := r.Itineries[0].Outbound.ArrivalAirport
-		leg2Dep := r.Itineries[1].Outbound.DepartureAirport
-		if r.StopCity != leg1Arr {
-			t.Errorf("result[%d]: StopCity %q != first leg arrival %q", i, r.StopCity, leg1Arr)
-		}
-		if leg1Arr != leg2Dep {
-			t.Errorf("result[%d]: first leg arrives at %q but second departs from %q",
-				i, leg1Arr, leg2Dep)
-		}
-
-		// Outbound layover should be between min and max
-		outboundLayover := r.StopLengths[0]
-		if outboundLayover < 3*time.Hour || outboundLayover > 6*time.Hour {
-			t.Errorf("result[%d]: outbound layover %v outside [3h, 6h]", i, outboundLayover)
-		}
-
-		// Inbound layover should also be valid
-		inboundLayover := r.StopLengths[1]
-		if inboundLayover < 3*time.Hour || inboundLayover > 6*time.Hour {
-			t.Errorf("result[%d]: inbound layover %v outside [3h, 6h]", i, inboundLayover)
-		}
-
-		// Each leg should have outbound and inbound with positive duration
-		for j, itin := range r.Itineries {
-			if itin.Outbound.Duration <= 0 {
-				t.Errorf("result[%d].leg[%d]: outbound duration must be positive, got %v",
-					i, j, itin.Outbound.Duration)
+	for stopCity, group := range results {
+		for i, r := range group {
+			// Validate price is sum of two legs
+			expectedPrice := r.Itineries[0].Price + r.Itineries[1].Price
+			if r.Price != expectedPrice {
+				t.Errorf("%s result[%d]: price %f != leg1(%f) + leg2(%f) = %f",
+					stopCity, i, r.Price, r.Itineries[0].Price, r.Itineries[1].Price, expectedPrice)
 			}
-			if itin.Inbound.Duration <= 0 {
-				t.Errorf("result[%d].leg[%d]: inbound duration must be positive, got %v",
-					i, j, itin.Inbound.Duration)
+
+			// Stop city should match the connection point
+			leg1Arr := r.Itineries[0].Outbound.ArrivalAirport
+			leg2Dep := r.Itineries[1].Outbound.DepartureAirport
+			if r.StopCity != leg1Arr {
+				t.Errorf("%s result[%d]: StopCity %q != first leg arrival %q", stopCity, i, r.StopCity, leg1Arr)
 			}
-			if len(itin.Outbound.Flights) == 0 {
-				t.Errorf("result[%d].leg[%d]: outbound has no flights", i, j)
+			if leg1Arr != leg2Dep {
+				t.Errorf("%s result[%d]: first leg arrives at %q but second departs from %q",
+					stopCity, i, leg1Arr, leg2Dep)
 			}
-			if len(itin.Inbound.Flights) == 0 {
-				t.Errorf("result[%d].leg[%d]: inbound has no flights", i, j)
+
+			// Outbound layover should be between min and max
+			outboundLayover := r.StopLengths[0]
+			if outboundLayover < 3*time.Hour || outboundLayover > 6*time.Hour {
+				t.Errorf("%s result[%d]: outbound layover %v outside [3h, 6h]", stopCity, i, outboundLayover)
+			}
+
+			// Inbound layover should also be valid
+			inboundLayover := r.StopLengths[1]
+			if inboundLayover < 3*time.Hour || inboundLayover > 6*time.Hour {
+				t.Errorf("%s result[%d]: inbound layover %v outside [3h, 6h]", stopCity, i, inboundLayover)
+			}
+
+			// Each leg should have outbound and inbound with positive duration
+			for j, itin := range r.Itineries {
+				if itin.Outbound.Duration <= 0 {
+					t.Errorf("%s result[%d].leg[%d]: outbound duration must be positive, got %v",
+						stopCity, i, j, itin.Outbound.Duration)
+				}
+				if itin.Inbound.Duration <= 0 {
+					t.Errorf("%s result[%d].leg[%d]: inbound duration must be positive, got %v",
+						stopCity, i, j, itin.Inbound.Duration)
+				}
+				if len(itin.Outbound.Flights) == 0 {
+					t.Errorf("%s result[%d].leg[%d]: outbound has no flights", stopCity, i, j)
+				}
+				if len(itin.Inbound.Flights) == 0 {
+					t.Errorf("%s result[%d].leg[%d]: inbound has no flights", stopCity, i, j)
+				}
 			}
 		}
 	}
@@ -407,12 +437,15 @@ func TestIntegration_Search_FlightDetailsPresent(t *testing.T) {
 		t.Fatalf("Search returned error: %v", err)
 	}
 
-	if len(results) == 0 {
+	if countResults(results) == 0 {
 		t.Skip("no results returned — cannot validate flight details")
 	}
 
 	// Check first result's flight details
-	r := results[0]
+	r, ok := firstResult(results)
+	if !ok {
+		t.Skip("no results returned — cannot validate flight details")
+	}
 	for j, itin := range r.Itineries {
 		for k, f := range itin.Outbound.Flights {
 			if f.FlightCode == "" {

@@ -33,16 +33,16 @@ func New(
 	}
 }
 
-func (s *Search) Search(req provider.Request) ([]Result, error) {
+func (s *Search) Search(req provider.Request) (map[string][]Result, error) {
 	return s.doSearch(req)
 }
 
-func (s *Search) doSearch(req provider.Request) ([]Result, error) {
+func (s *Search) doSearch(req provider.Request) (map[string][]Result, error) {
 	// explore origins and destinations in parallel
 	// expand reasonable first legs to get actual itineries with flight prices.
 	// then expand these to get the second legs of the journeys.
 	// then we need to combine these into valid one stop journeys.
-	// sort by price and return.
+	// group by stopover city and sort each group by price.
 	basePrice, err := s.getBasePrice(req)
 	if err != nil {
 		return nil, err
@@ -255,7 +255,7 @@ func (s *Search) filterReasonableItineraries(
 
 func (s *Search) combineItineraries(
 	firstOr, secondOr, firstDest, secondDest [][]itinery.Itinery,
-) ([]Result, error) {
+) (map[string][]Result, error) {
 	// we want to combine the first and second legs of the itineraries to get valid one stop journeys.
 	// we can do this by iterating over the first legs and then finding the matching second legs.
 	// we can then calculate the total price and duration of the journey and sort by price.
@@ -263,20 +263,26 @@ func (s *Search) combineItineraries(
 	orStop := combine.ConstructStop(firstOr, secondOr)
 	destStop := combine.ConstructStop(firstDest, secondDest)
 
-	results := []Result{}
+	results := make(map[string][]Result)
 	for _, stop := range orStop {
 		res := combine.OneStop(stop[0], stop[1], minLayover, maxLayover)
 		for _, r := range res {
-			results = append(results, NewResult(r.First, r.Second))
+			result := NewResult(r.First, r.Second)
+			results[result.StopCity] = append(results[result.StopCity], result)
 		}
 	}
 	for _, stop := range destStop {
 		res := combine.OneStop(stop[0], stop[1], minLayover, maxLayover)
 		for _, r := range res {
-			results = append(results, NewResult(r.First, r.Second))
+			result := NewResult(r.First, r.Second)
+			results[result.StopCity] = append(results[result.StopCity], result)
 		}
 	}
 
-	sort.Slice(results, func(i, j int) bool { return results[i].Price < results[j].Price })
+	for stopCity := range results {
+		sort.Slice(results[stopCity], func(i, j int) bool {
+			return results[stopCity][i].Price < results[stopCity][j].Price
+		})
+	}
 	return results, nil
 }

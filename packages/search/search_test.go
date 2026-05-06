@@ -63,6 +63,14 @@ func defaultRequest() provider.Request {
 	}
 }
 
+func countResults(results map[string][]Result) int {
+	count := 0
+	for _, group := range results {
+		count += len(group)
+	}
+	return count
+}
+
 type searchKey struct {
 	Origin      string
 	Destination string
@@ -207,8 +215,8 @@ func TestSearch_EmptyBasePrice_NoExploreResults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results, got %d", countResults(results))
 	}
 }
 
@@ -238,8 +246,8 @@ func TestSearch_FilterReasonableItineraries_AllFiltered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results after filtering, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results after filtering, got %d", countResults(results))
 	}
 }
 
@@ -321,10 +329,14 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
+	if countResults(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", countResults(results))
 	}
-	r := results[0]
+	group := results["JFK"]
+	if len(group) != 1 {
+		t.Fatalf("expected 1 JFK result, got %d", len(group))
+	}
+	r := group[0]
 	if r.Price != 500.0 {
 		t.Errorf("expected combined price 500.0, got %f", r.Price)
 	}
@@ -366,8 +378,8 @@ func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results with invalid layover, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results with invalid layover, got %d", countResults(results))
 	}
 }
 
@@ -424,14 +436,21 @@ func TestSearch_EndToEnd_MultipleStops(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(results) != 2 {
-		t.Fatalf("expected 2 results for two stops, got %d", len(results))
+		t.Fatalf("expected 2 stop cities, got %d", len(results))
 	}
-	// Should be sorted by price: ORD stop (280+150=430) then JFK (300+200=500)
-	if results[0].Price != 430.0 {
-		t.Errorf("first result price expected 430.0, got %f", results[0].Price)
+	ordGroup := results["ORD"]
+	if len(ordGroup) != 1 {
+		t.Fatalf("expected 1 ORD result, got %d", len(ordGroup))
 	}
-	if results[1].Price != 500.0 {
-		t.Errorf("second result price expected 500.0, got %f", results[1].Price)
+	if ordGroup[0].Price != 430.0 {
+		t.Errorf("ORD result price expected 430.0, got %f", ordGroup[0].Price)
+	}
+	jfkGroup := results["JFK"]
+	if len(jfkGroup) != 1 {
+		t.Fatalf("expected 1 JFK result, got %d", len(jfkGroup))
+	}
+	if jfkGroup[0].Price != 500.0 {
+		t.Errorf("JFK result price expected 500.0, got %f", jfkGroup[0].Price)
 	}
 }
 
@@ -475,9 +494,13 @@ func TestSearch_ResultsSortedByPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for i := 1; i < len(results); i++ {
-		if results[i].Price < results[i-1].Price {
-			t.Errorf("results not sorted by price: %f before %f", results[i-1].Price, results[i].Price)
+	group := results["JFK"]
+	if len(group) < 2 {
+		t.Fatalf("expected at least 2 JFK results, got %d", len(group))
+	}
+	for i := 1; i < len(group); i++ {
+		if group[i].Price < group[i-1].Price {
+			t.Errorf("JFK results not sorted by price: %f before %f", group[i-1].Price, group[i].Price)
 		}
 	}
 }
@@ -524,7 +547,7 @@ func TestSearch_BothExploreDirections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) == 0 {
+	if countResults(results) == 0 {
 		t.Error("expected at least one result from both explore directions")
 	}
 }
@@ -893,11 +916,12 @@ func TestCombineItineraries_ValidPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
+	group := results["JFK"]
+	if len(group) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(group))
 	}
-	if results[0].Price != 500.0 {
-		t.Errorf("expected price 500.0, got %f", results[0].Price)
+	if group[0].Price != 500.0 {
+		t.Errorf("expected price 500.0, got %f", group[0].Price)
 	}
 }
 
@@ -923,8 +947,8 @@ func TestCombineItineraries_NoMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results with non-matching airports, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results with non-matching airports, got %d", countResults(results))
 	}
 }
 
@@ -936,8 +960,8 @@ func TestCombineItineraries_EmptyInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results from empty input, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results from empty input, got %d", countResults(results))
 	}
 }
 
@@ -968,9 +992,13 @@ func TestCombineItineraries_SortedByPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for i := 1; i < len(results); i++ {
-		if results[i].Price < results[i-1].Price {
-			t.Errorf("results not sorted: %f before %f", results[i-1].Price, results[i].Price)
+	group := results["JFK"]
+	if len(group) < 2 {
+		t.Fatalf("expected at least 2 JFK results, got %d", len(group))
+	}
+	for i := 1; i < len(group); i++ {
+		if group[i].Price < group[i-1].Price {
+			t.Errorf("results not sorted: %f before %f", group[i-1].Price, group[i].Price)
 		}
 	}
 }
