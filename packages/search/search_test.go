@@ -50,6 +50,32 @@ func makeItin(depAirport, arrAirport string, depTime, arrTime time.Time, price f
 	}
 }
 
+func emptyCalendarGrid(start, end time.Time) [][]float64 {
+	startDay := normalizeDay(start)
+	endDay := normalizeDay(end)
+	if endDay.Before(startDay) {
+		return [][]float64{}
+	}
+	days := int(endDay.Sub(startDay).Hours()/24) + 1
+	grid := make([][]float64, days)
+	for i := range grid {
+		grid[i] = make([]float64, days)
+	}
+	return grid
+}
+
+func calendarGridWithPrice(start, end time.Time, depOffset, retOffset int, price float64) [][]float64 {
+	grid := emptyCalendarGrid(start, end)
+	if len(grid) == 0 {
+		return grid
+	}
+	if depOffset < 0 || retOffset < 0 || depOffset >= len(grid) || retOffset >= len(grid) {
+		return grid
+	}
+	grid[depOffset][retOffset] = price
+	return grid
+}
+
 func defaultRequest() provider.Request {
 	return provider.Request{
 		Origin:        "LHR",
@@ -61,6 +87,14 @@ func defaultRequest() provider.Request {
 		Class:         provider.Economy,
 		Currency:      currency.GBP,
 	}
+}
+
+func countResults(results map[string][]Result) int {
+	count := 0
+	for _, group := range results {
+		count += len(group)
+	}
+	return count
 }
 
 type searchKey struct {
@@ -79,6 +113,17 @@ func setupFake(
 	searchErrors map[searchKey]error,
 	exploreResults map[exploreKey][]itinery.ExploreItinery,
 	exploreErrors map[exploreKey]error,
+) *providerfakes.FakeProvider {
+	return setupFakeWithCalendar(searchResults, searchErrors, exploreResults, exploreErrors, nil, nil)
+}
+
+func setupFakeWithCalendar(
+	searchResults map[searchKey][]itinery.Itinery,
+	searchErrors map[searchKey]error,
+	exploreResults map[exploreKey][]itinery.ExploreItinery,
+	exploreErrors map[exploreKey]error,
+	calendarResults map[searchKey][][]float64,
+	calendarErrors map[searchKey]error,
 ) *providerfakes.FakeProvider {
 	fake := &providerfakes.FakeProvider{}
 
@@ -102,6 +147,17 @@ func setupFake(
 			return res, nil
 		}
 		return []itinery.ExploreItinery{}, nil
+	})
+
+	fake.GetPriceCalendarCalls(func(_ context.Context, req provider.Request) ([][]float64, error) {
+		key := searchKey{Origin: req.Origin, Destination: req.Destination}
+		if err, ok := calendarErrors[key]; ok {
+			return nil, err
+		}
+		if res, ok := calendarResults[key]; ok {
+			return res, nil
+		}
+		return emptyCalendarGrid(req.DepartureDate, req.ReturnDate), nil
 	})
 
 	fake.SortByPriceCalls(func(itins *[]itinery.Itinery) {
@@ -207,8 +263,8 @@ func TestSearch_EmptyBasePrice_NoExploreResults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results, got %d", countResults(results))
 	}
 }
 
@@ -238,8 +294,8 @@ func TestSearch_FilterReasonableItineraries_AllFiltered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results after filtering, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results after filtering, got %d", countResults(results))
 	}
 }
 
@@ -251,7 +307,11 @@ func TestSearch_SecondLegUsesFirstArrivalTime(t *testing.T) {
 		Inbound:  makeLeg("JFK", "LHR", baseTime.Add(7*24*time.Hour), baseTime.Add(7*24*time.Hour+8*time.Hour), 0),
 		Price:    300.0,
 	}
-	fake := setupFake(
+	windowStart := normalizeDay(firstLeg.Outbound.ArrivalTime)
+	windowEnd := normalizeDay(firstLeg.Inbound.DepartureTime)
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}:                {firstLeg},
@@ -263,6 +323,10 @@ func TestSearch_SecondLegUsesFirstArrivalTime(t *testing.T) {
 			{Origin: req.Origin}:      {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -272,14 +336,18 @@ func TestSearch_SecondLegUsesFirstArrivalTime(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expected := baseTime.Add(8 * time.Hour)
+	expectedDep := windowStart
+	expectedRet := windowStart.Add(24 * time.Hour)
 	found := false
 	for i := 0; i < fake.SearchCallCount(); i++ {
 		_, gotReq := fake.SearchArgsForCall(i)
 		if gotReq.Origin == "JFK" && gotReq.Destination == "LAX" {
 			found = true
-			if !gotReq.DepartureDate.Equal(expected) {
-				t.Fatalf("expected second leg departure %v, got %v", expected, gotReq.DepartureDate)
+			if !gotReq.DepartureDate.Equal(expectedDep) {
+				t.Fatalf("expected second leg departure %v, got %v", expectedDep, gotReq.DepartureDate)
+			}
+			if !gotReq.ReturnDate.Equal(expectedRet) {
+				t.Fatalf("expected second leg return %v, got %v", expectedRet, gotReq.ReturnDate)
 			}
 		}
 	}
@@ -301,7 +369,11 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 		Inbound:  makeLeg("LAX", "JFK", baseTime.Add(7*24*time.Hour-3*time.Hour), baseTime.Add(7*24*time.Hour-1*time.Hour), 0),
 		Price:    200.0,
 	}
-	fake := setupFake(
+	windowStart := normalizeDay(firstLeg.Outbound.ArrivalTime)
+	windowEnd := normalizeDay(firstLeg.Inbound.DepartureTime)
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}:                {firstLeg},
@@ -313,6 +385,10 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 			{Origin: req.Origin}:      {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -321,10 +397,14 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
+	if countResults(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", countResults(results))
 	}
-	r := results[0]
+	group := results["JFK"]
+	if len(group) != 1 {
+		t.Fatalf("expected 1 JFK result, got %d", len(group))
+	}
+	r := group[0]
 	if r.Price != 500.0 {
 		t.Errorf("expected combined price 500.0, got %f", r.Price)
 	}
@@ -333,7 +413,7 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 	}
 }
 
-func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
+func TestSearch_EndToEnd_NoValidBounds(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 1000.0)
 	firstLeg := itinery.Itinery{
@@ -343,10 +423,14 @@ func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
 	}
 	secondLeg := itinery.Itinery{
 		Outbound: makeLeg("JFK", "LAX", baseTime.Add(8*time.Hour+30*time.Minute), baseTime.Add(13*time.Hour), 0),
-		Inbound:  makeLeg("LAX", "JFK", baseTime.Add(7*24*time.Hour-3*time.Hour), baseTime.Add(7*24*time.Hour-1*time.Hour), 0),
+		Inbound:  makeLeg("LAX", "JFK", baseTime.Add(7*24*time.Hour+9*time.Hour), baseTime.Add(7*24*time.Hour+11*time.Hour), 0),
 		Price:    200.0,
 	}
-	fake := setupFake(
+	windowStart := normalizeDay(firstLeg.Outbound.ArrivalTime)
+	windowEnd := normalizeDay(firstLeg.Inbound.DepartureTime)
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}:                {firstLeg},
@@ -358,6 +442,10 @@ func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
 			{Origin: req.Origin}:      {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -366,15 +454,22 @@ func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results with invalid layover, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results with invalid bounds, got %d", countResults(results))
 	}
 }
 
 func TestSearch_EndToEnd_MultipleStops(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 1000.0)
-	fake := setupFake(
+	windowStartJFK := normalizeDay(baseTime.Add(8 * time.Hour))
+	windowEndJFK := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	windowStartORD := normalizeDay(baseTime.Add(9 * time.Hour))
+	windowEndORD := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	gridJFK := calendarGridWithPrice(windowStartJFK, windowEndJFK, 0, 1, 200.0)
+	gridORD := calendarGridWithPrice(windowStartORD, windowEndORD, 0, 1, 150.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}: {
@@ -415,6 +510,11 @@ func TestSearch_EndToEnd_MultipleStops(t *testing.T) {
 			{Origin: req.Origin}: {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: gridJFK,
+			{Origin: "ORD", Destination: "LAX"}: gridORD,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -424,21 +524,32 @@ func TestSearch_EndToEnd_MultipleStops(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(results) != 2 {
-		t.Fatalf("expected 2 results for two stops, got %d", len(results))
+		t.Fatalf("expected 2 stop cities, got %d", len(results))
 	}
-	// Should be sorted by price: ORD stop (280+150=430) then JFK (300+200=500)
-	if results[0].Price != 430.0 {
-		t.Errorf("first result price expected 430.0, got %f", results[0].Price)
+	ordGroup := results["ORD"]
+	if len(ordGroup) != 1 {
+		t.Fatalf("expected 1 ORD result, got %d", len(ordGroup))
 	}
-	if results[1].Price != 500.0 {
-		t.Errorf("second result price expected 500.0, got %f", results[1].Price)
+	if ordGroup[0].Price != 430.0 {
+		t.Errorf("ORD result price expected 430.0, got %f", ordGroup[0].Price)
+	}
+	jfkGroup := results["JFK"]
+	if len(jfkGroup) != 1 {
+		t.Fatalf("expected 1 JFK result, got %d", len(jfkGroup))
+	}
+	if jfkGroup[0].Price != 500.0 {
+		t.Errorf("JFK result price expected 500.0, got %f", jfkGroup[0].Price)
 	}
 }
 
 func TestSearch_ResultsSortedByPrice(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 2000.0)
-	fake := setupFake(
+	windowStart := normalizeDay(baseTime.Add(8 * time.Hour))
+	windowEnd := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}: {
@@ -467,6 +578,10 @@ func TestSearch_ResultsSortedByPrice(t *testing.T) {
 			{Origin: req.Origin}:      {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -475,9 +590,13 @@ func TestSearch_ResultsSortedByPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for i := 1; i < len(results); i++ {
-		if results[i].Price < results[i-1].Price {
-			t.Errorf("results not sorted by price: %f before %f", results[i-1].Price, results[i].Price)
+	group := results["JFK"]
+	if len(group) < 2 {
+		t.Fatalf("expected at least 2 JFK results, got %d", len(group))
+	}
+	for i := 1; i < len(group); i++ {
+		if group[i].Price < group[i-1].Price {
+			t.Errorf("JFK results not sorted by price: %f before %f", group[i-1].Price, group[i].Price)
 		}
 	}
 }
@@ -485,7 +604,14 @@ func TestSearch_ResultsSortedByPrice(t *testing.T) {
 func TestSearch_BothExploreDirections(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 2000.0)
-	fake := setupFake(
+	windowStartJFK := normalizeDay(baseTime.Add(8 * time.Hour))
+	windowEndJFK := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	windowStartDUB := normalizeDay(baseTime.Add(1 * time.Hour))
+	windowEndDUB := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	gridJFK := calendarGridWithPrice(windowStartJFK, windowEndJFK, 0, 1, 200.0)
+	gridDUB := calendarGridWithPrice(windowStartDUB, windowEndDUB, 0, 1, 80.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}: {
@@ -516,6 +642,11 @@ func TestSearch_BothExploreDirections(t *testing.T) {
 			{Origin: req.Origin}:      {{Destination: "DUB", Price: 30.0}},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: gridJFK,
+			{Origin: "DUB", Destination: "LAX"}: gridDUB,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -524,7 +655,7 @@ func TestSearch_BothExploreDirections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) == 0 {
+	if countResults(results) == 0 {
 		t.Error("expected at least one result from both explore directions")
 	}
 }
@@ -893,11 +1024,12 @@ func TestCombineItineraries_ValidPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
+	group := results["JFK"]
+	if len(group) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(group))
 	}
-	if results[0].Price != 500.0 {
-		t.Errorf("expected price 500.0, got %f", results[0].Price)
+	if group[0].Price != 500.0 {
+		t.Errorf("expected price 500.0, got %f", group[0].Price)
 	}
 }
 
@@ -923,8 +1055,8 @@ func TestCombineItineraries_NoMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results with non-matching airports, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results with non-matching airports, got %d", countResults(results))
 	}
 }
 
@@ -936,8 +1068,8 @@ func TestCombineItineraries_EmptyInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("expected 0 results from empty input, got %d", len(results))
+	if countResults(results) != 0 {
+		t.Errorf("expected 0 results from empty input, got %d", countResults(results))
 	}
 }
 
@@ -968,9 +1100,13 @@ func TestCombineItineraries_SortedByPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for i := 1; i < len(results); i++ {
-		if results[i].Price < results[i-1].Price {
-			t.Errorf("results not sorted: %f before %f", results[i-1].Price, results[i].Price)
+	group := results["JFK"]
+	if len(group) < 2 {
+		t.Fatalf("expected at least 2 JFK results, got %d", len(group))
+	}
+	for i := 1; i < len(group); i++ {
+		if group[i].Price < group[i-1].Price {
+			t.Errorf("results not sorted: %f before %f", group[i-1].Price, group[i].Price)
 		}
 	}
 }

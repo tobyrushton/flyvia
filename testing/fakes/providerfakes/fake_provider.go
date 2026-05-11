@@ -25,6 +25,20 @@ type FakeProvider struct {
 		result1 []itinery.ExploreItinery
 		result2 error
 	}
+	GetPriceCalendarStub        func(context.Context, provider.Request) ([][]float64, error)
+	getPriceCalendarMutex       sync.RWMutex
+	getPriceCalendarArgsForCall []struct {
+		arg1 context.Context
+		arg2 provider.Request
+	}
+	getPriceCalendarReturns struct {
+		result1 [][]float64
+		result2 error
+	}
+	getPriceCalendarReturnsOnCall map[int]struct {
+		result1 [][]float64
+		result2 error
+	}
 	SearchStub        func(context.Context, provider.Request) ([]itinery.Itinery, error)
 	searchMutex       sync.RWMutex
 	searchArgsForCall []struct {
@@ -110,6 +124,71 @@ func (fake *FakeProvider) ExploreReturnsOnCall(i int, result1 []itinery.ExploreI
 	}
 	fake.exploreReturnsOnCall[i] = struct {
 		result1 []itinery.ExploreItinery
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeProvider) GetPriceCalendar(arg1 context.Context, arg2 provider.Request) ([][]float64, error) {
+	fake.getPriceCalendarMutex.Lock()
+	ret, specificReturn := fake.getPriceCalendarReturnsOnCall[len(fake.getPriceCalendarArgsForCall)]
+	fake.getPriceCalendarArgsForCall = append(fake.getPriceCalendarArgsForCall, struct {
+		arg1 context.Context
+		arg2 provider.Request
+	}{arg1, arg2})
+	stub := fake.GetPriceCalendarStub
+	fakeReturns := fake.getPriceCalendarReturns
+	fake.recordInvocation("GetPriceCalendar", []interface{}{arg1, arg2})
+	fake.getPriceCalendarMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeProvider) GetPriceCalendarCallCount() int {
+	fake.getPriceCalendarMutex.RLock()
+	defer fake.getPriceCalendarMutex.RUnlock()
+	return len(fake.getPriceCalendarArgsForCall)
+}
+
+func (fake *FakeProvider) GetPriceCalendarCalls(stub func(context.Context, provider.Request) ([][]float64, error)) {
+	fake.getPriceCalendarMutex.Lock()
+	defer fake.getPriceCalendarMutex.Unlock()
+	fake.GetPriceCalendarStub = stub
+}
+
+func (fake *FakeProvider) GetPriceCalendarArgsForCall(i int) (context.Context, provider.Request) {
+	fake.getPriceCalendarMutex.RLock()
+	defer fake.getPriceCalendarMutex.RUnlock()
+	argsForCall := fake.getPriceCalendarArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *FakeProvider) GetPriceCalendarReturns(result1 [][]float64, result2 error) {
+	fake.getPriceCalendarMutex.Lock()
+	defer fake.getPriceCalendarMutex.Unlock()
+	fake.GetPriceCalendarStub = nil
+	fake.getPriceCalendarReturns = struct {
+		result1 [][]float64
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeProvider) GetPriceCalendarReturnsOnCall(i int, result1 [][]float64, result2 error) {
+	fake.getPriceCalendarMutex.Lock()
+	defer fake.getPriceCalendarMutex.Unlock()
+	fake.GetPriceCalendarStub = nil
+	if fake.getPriceCalendarReturnsOnCall == nil {
+		fake.getPriceCalendarReturnsOnCall = make(map[int]struct {
+			result1 [][]float64
+			result2 error
+		})
+	}
+	fake.getPriceCalendarReturnsOnCall[i] = struct {
+		result1 [][]float64
 		result2 error
 	}{result1, result2}
 }

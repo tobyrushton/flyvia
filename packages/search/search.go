@@ -13,10 +13,7 @@ import (
 	"github.com/tobyrushton/flyvia/packages/search/provider"
 )
 
-const (
-	minLayover = 3 * time.Hour
-	maxLayover = 6 * time.Hour
-)
+const maxCalendarCandidates = 5
 
 type Search struct {
 	ctx context.Context
@@ -33,16 +30,16 @@ func New(
 	}
 }
 
-func (s *Search) Search(req provider.Request) ([]Result, error) {
+func (s *Search) Search(req provider.Request) (map[string][]Result, error) {
 	return s.doSearch(req)
 }
 
-func (s *Search) doSearch(req provider.Request) ([]Result, error) {
+func (s *Search) doSearch(req provider.Request) (map[string][]Result, error) {
 	// explore origins and destinations in parallel
 	// expand reasonable first legs to get actual itineries with flight prices.
 	// then expand these to get the second legs of the journeys.
 	// then we need to combine these into valid one stop journeys.
-	// sort by price and return.
+	// group by stopover city and sort each group by price.
 	basePrice, err := s.getBasePrice(req)
 	if err != nil {
 		return nil, err
@@ -57,13 +54,13 @@ func (s *Search) doSearch(req provider.Request) ([]Result, error) {
 	exploreOr = s.filterReasonableItineraries(exploreOr, basePrice)
 	exploreDest = s.filterReasonableItineraries(exploreDest, basePrice)
 
-	firstOr, secondOr, err := s.expandOneStopLegs(req, exploreOr, req.Origin, req.Destination)
+	firstOr, secondOr, err := s.expandOneStopLegs(req, exploreOr, req.Origin, req.Destination, basePrice)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Println("expanded origin stop legs")
 
-	firstDest, secondDest, err := s.expandOneStopLegs(req, exploreDest, req.Origin, req.Destination)
+	firstDest, secondDest, err := s.expandOneStopLegs(req, exploreDest, req.Origin, req.Destination, basePrice)
 	if err != nil {
 		return nil, err
 	}
@@ -152,8 +149,10 @@ func (s *Search) expandOneStopLegs(
 	exploreItineries []itinery.ExploreItinery,
 	firstOrigin string,
 	finalDestination string,
+	basePrice float64,
 ) ([][]itinery.Itinery, [][]itinery.Itinery, error) {
-	// expand first-leg offers, then expand second-leg offers using the earliest arrival as the outbound time.
+	// expand first-leg offers, then use the price calendar to search for valid stopover lengths
+	// within budget and boundary constraints, before fetching concrete second-leg itineraries.
 	wg := sync.WaitGroup{}
 	firstLegs := make([][]itinery.Itinery, 0)
 	secondLegs := make([][]itinery.Itinery, 0)
@@ -187,30 +186,114 @@ func (s *Search) expandOneStopLegs(
 			firstLegs = append(firstLegs, first)
 			firstMu.Unlock()
 
-			outboundTime := earliestArrival(first)
-			if outboundTime.IsZero() {
-				outboundTime = req.DepartureDate
+			windowStart, windowEnd := firstLegDateWindow(first)
+			if windowStart.IsZero() || windowEnd.IsZero() || windowEnd.Before(windowStart) {
+				return
 			}
-			second, err := s.p.Search(s.ctx, provider.Request{
+
+			calendarReq := provider.Request{
 				Origin:        stop,
 				Destination:   finalDestination,
-				DepartureDate: outboundTime,
-				ReturnDate:    req.ReturnDate,
+				DepartureDate: windowStart,
+				ReturnDate:    windowEnd,
 				Adults:        req.Adults,
 				Children:      req.Children,
 				Class:         req.Class,
 				Currency:      req.Currency,
-			})
+			}
+			grid, err := s.p.GetPriceCalendar(s.ctx, calendarReq)
 			if err != nil {
-				s.logExpandError("second-legs", stop, finalDestination, err)
+				s.logExpandError("calendar", stop, finalDestination, err)
 				return
 			}
-			if len(second) == 0 {
+
+			secondForStop := make([]itinery.Itinery, 0)
+			secondCache := make(map[string]*secondFetch)
+			var cacheMu sync.Mutex
+			var secondForStopMu sync.Mutex
+			for _, firstItin := range first {
+				depMin := normalizeDay(firstItin.Outbound.ArrivalTime)
+				retMax := normalizeDay(firstItin.Inbound.DepartureTime)
+				if depMin.IsZero() || retMax.IsZero() || retMax.Before(depMin) {
+					continue
+				}
+
+				budgetCap := basePrice - firstItin.Price
+				if budgetCap <= 0 {
+					continue
+				}
+
+				candidates := gridCandidates(
+					grid,
+					windowStart,
+					depMin,
+					retMax,
+					budgetCap,
+					maxCalendarCandidates,
+				)
+				var candidatesWg sync.WaitGroup
+				for _, candidate := range candidates {
+					candidatesWg.Add(1)
+					go func() {
+						defer candidatesWg.Done()
+						key := candidate.Depart.Format("2006-01-02") + "|" + candidate.Return.Format("2006-01-02")
+
+						cacheMu.Lock()
+						fetch, ok := secondCache[key]
+						if ok {
+							cacheMu.Unlock()
+							fetch.wg.Wait()
+							if len(fetch.itins) == 0 {
+								return
+							}
+							secondForStopMu.Lock()
+							secondForStop = append(secondForStop, fetch.itins...)
+							secondForStopMu.Unlock()
+							return
+						}
+						fetch = &secondFetch{}
+						fetch.wg.Add(1)
+						secondCache[key] = fetch
+						cacheMu.Unlock()
+
+						secondItins, err := s.p.Search(s.ctx, provider.Request{
+							Origin:        stop,
+							Destination:   finalDestination,
+							DepartureDate: candidate.Depart,
+							ReturnDate:    candidate.Return,
+							Adults:        req.Adults,
+							Children:      req.Children,
+							Class:         req.Class,
+							Currency:      req.Currency,
+						})
+						if err != nil {
+							s.logExpandError("second-legs", stop, finalDestination, err)
+							secondItins = []itinery.Itinery{}
+						}
+						if len(secondItins) != 0 {
+							sort.Slice(secondItins, func(i, j int) bool { return secondItins[i].Price < secondItins[j].Price })
+						}
+
+						cacheMu.Lock()
+						fetch.itins = secondItins
+						fetch.wg.Done()
+						cacheMu.Unlock()
+
+						if len(secondItins) == 0 {
+							return
+						}
+						secondForStopMu.Lock()
+						secondForStop = append(secondForStop, secondItins...)
+						secondForStopMu.Unlock()
+					}()
+				}
+				candidatesWg.Wait()
+			}
+			if len(secondForStop) == 0 {
 				return
 			}
-			sort.Slice(second, func(i, j int) bool { return second[i].Price < second[j].Price })
 			secondMu.Lock()
-			secondLegs = append(secondLegs, second)
+			secondLegs = append(secondLegs, secondForStop)
 			secondMu.Unlock()
 		}(stop)
 	}
@@ -219,17 +302,100 @@ func (s *Search) expandOneStopLegs(
 	return firstLegs, secondLegs, nil
 }
 
-func earliestArrival(itineries []itinery.Itinery) time.Time {
-	var earliest time.Time
-	for _, itin := range itineries {
-		if itin.Outbound.ArrivalTime.IsZero() {
+type gridCandidate struct {
+	Depart time.Time
+	Return time.Time
+	Price  float64
+}
+
+type secondFetch struct {
+	wg    sync.WaitGroup
+	itins []itinery.Itinery
+}
+
+func normalizeDay(t time.Time) time.Time {
+	if t.IsZero() {
+		return time.Time{}
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+func firstLegDateWindow(itins []itinery.Itinery) (time.Time, time.Time) {
+	var minArrival time.Time
+	var maxInbound time.Time
+	for _, itin := range itins {
+		arr := normalizeDay(itin.Outbound.ArrivalTime)
+		dep := normalizeDay(itin.Inbound.DepartureTime)
+		if arr.IsZero() || dep.IsZero() {
 			continue
 		}
-		if earliest.IsZero() || itin.Outbound.ArrivalTime.Before(earliest) {
-			earliest = itin.Outbound.ArrivalTime
+		if minArrival.IsZero() || arr.Before(minArrival) {
+			minArrival = arr
+		}
+		if maxInbound.IsZero() || dep.After(maxInbound) {
+			maxInbound = dep
 		}
 	}
-	return earliest
+	return minArrival, maxInbound
+}
+
+func gridCandidates(
+	grid [][]float64,
+	gridStart time.Time,
+	depMin time.Time,
+	retMax time.Time,
+	budgetCap float64,
+	limit int,
+) []gridCandidate {
+	if len(grid) == 0 || limit <= 0 {
+		return nil
+	}
+	gridSize := len(grid)
+	depStartIdx := clampDayIndex(depMin, gridStart, gridSize)
+	depEndIdx := clampDayIndex(retMax, gridStart, gridSize)
+	retEndIdx := depEndIdx
+
+	candidates := make([]gridCandidate, 0)
+	for depIdx := depStartIdx; depIdx <= depEndIdx; depIdx++ {
+		row := grid[depIdx]
+		for retIdx := depIdx; retIdx <= retEndIdx; retIdx++ {
+			if retIdx >= len(row) {
+				continue
+			}
+			price := row[retIdx]
+			if price <= 0 || price > budgetCap {
+				continue
+			}
+			candidates = append(candidates, gridCandidate{
+				Depart: gridStart.AddDate(0, 0, depIdx),
+				Return: gridStart.AddDate(0, 0, retIdx),
+				Price:  price,
+			})
+		}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Price < candidates[j].Price })
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	return candidates
+}
+
+func clampDayIndex(t time.Time, start time.Time, size int) int {
+	if size <= 0 {
+		return 0
+	}
+	if t.Before(start) {
+		return 0
+	}
+	idx := int(t.Sub(start).Hours() / 24)
+	if idx < 0 {
+		return 0
+	}
+	if idx >= size {
+		return size - 1
+	}
+	return idx
 }
 
 func (s *Search) logExpandError(phase, origin, destination string, err error) {
@@ -255,7 +421,7 @@ func (s *Search) filterReasonableItineraries(
 
 func (s *Search) combineItineraries(
 	firstOr, secondOr, firstDest, secondDest [][]itinery.Itinery,
-) ([]Result, error) {
+) (map[string][]Result, error) {
 	// we want to combine the first and second legs of the itineraries to get valid one stop journeys.
 	// we can do this by iterating over the first legs and then finding the matching second legs.
 	// we can then calculate the total price and duration of the journey and sort by price.
@@ -263,20 +429,26 @@ func (s *Search) combineItineraries(
 	orStop := combine.ConstructStop(firstOr, secondOr)
 	destStop := combine.ConstructStop(firstDest, secondDest)
 
-	results := []Result{}
+	results := make(map[string][]Result)
 	for _, stop := range orStop {
-		res := combine.OneStop(stop[0], stop[1], minLayover, maxLayover)
+		res := combine.OneStopWithinBounds(stop[0], stop[1])
 		for _, r := range res {
-			results = append(results, NewResult(r.First, r.Second))
+			result := NewResult(r.First, r.Second)
+			results[result.StopCity] = append(results[result.StopCity], result)
 		}
 	}
 	for _, stop := range destStop {
-		res := combine.OneStop(stop[0], stop[1], minLayover, maxLayover)
+		res := combine.OneStopWithinBounds(stop[0], stop[1])
 		for _, r := range res {
-			results = append(results, NewResult(r.First, r.Second))
+			result := NewResult(r.First, r.Second)
+			results[result.StopCity] = append(results[result.StopCity], result)
 		}
 	}
 
-	sort.Slice(results, func(i, j int) bool { return results[i].Price < results[j].Price })
+	for stopCity := range results {
+		sort.Slice(results[stopCity], func(i, j int) bool {
+			return results[stopCity][i].Price < results[stopCity][j].Price
+		})
+	}
 	return results, nil
 }
