@@ -39,6 +39,27 @@ func OneStop(
 	return results
 }
 
+func OneStopWithinBounds(
+	firstItineries, secondItineries []itinery.Itinery,
+) []CombinedItinery {
+	index := make(map[string][]itinery.Itinery)
+	for _, itin := range secondItineries {
+		index[itin.Outbound.DepartureAirport] = append(index[itin.Outbound.DepartureAirport], itin)
+	}
+
+	results := make([]CombinedItinery, 0)
+	for _, first := range firstItineries {
+		candidates := index[first.Outbound.ArrivalAirport]
+		for _, second := range candidates {
+			if validBounds(first, second) {
+				results = append(results, CombinedItinery{First: first, Second: second})
+			}
+		}
+	}
+
+	return results
+}
+
 func ConstructStop(first, second [][]itinery.Itinery) map[string][2][]itinery.Itinery {
 	// this is a helper function to construct the stop map for the one stop search.
 	stopMap := make(map[string][2][]itinery.Itinery)

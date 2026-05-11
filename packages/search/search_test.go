@@ -50,6 +50,32 @@ func makeItin(depAirport, arrAirport string, depTime, arrTime time.Time, price f
 	}
 }
 
+func emptyCalendarGrid(start, end time.Time) [][]float64 {
+	startDay := normalizeDay(start)
+	endDay := normalizeDay(end)
+	if endDay.Before(startDay) {
+		return [][]float64{}
+	}
+	days := int(endDay.Sub(startDay).Hours()/24) + 1
+	grid := make([][]float64, days)
+	for i := range grid {
+		grid[i] = make([]float64, days)
+	}
+	return grid
+}
+
+func calendarGridWithPrice(start, end time.Time, depOffset, retOffset int, price float64) [][]float64 {
+	grid := emptyCalendarGrid(start, end)
+	if len(grid) == 0 {
+		return grid
+	}
+	if depOffset < 0 || retOffset < 0 || depOffset >= len(grid) || retOffset >= len(grid) {
+		return grid
+	}
+	grid[depOffset][retOffset] = price
+	return grid
+}
+
 func defaultRequest() provider.Request {
 	return provider.Request{
 		Origin:        "LHR",
@@ -88,6 +114,17 @@ func setupFake(
 	exploreResults map[exploreKey][]itinery.ExploreItinery,
 	exploreErrors map[exploreKey]error,
 ) *providerfakes.FakeProvider {
+	return setupFakeWithCalendar(searchResults, searchErrors, exploreResults, exploreErrors, nil, nil)
+}
+
+func setupFakeWithCalendar(
+	searchResults map[searchKey][]itinery.Itinery,
+	searchErrors map[searchKey]error,
+	exploreResults map[exploreKey][]itinery.ExploreItinery,
+	exploreErrors map[exploreKey]error,
+	calendarResults map[searchKey][][]float64,
+	calendarErrors map[searchKey]error,
+) *providerfakes.FakeProvider {
 	fake := &providerfakes.FakeProvider{}
 
 	fake.SearchCalls(func(_ context.Context, req provider.Request) ([]itinery.Itinery, error) {
@@ -110,6 +147,17 @@ func setupFake(
 			return res, nil
 		}
 		return []itinery.ExploreItinery{}, nil
+	})
+
+	fake.GetPriceCalendarCalls(func(_ context.Context, req provider.Request) ([][]float64, error) {
+		key := searchKey{Origin: req.Origin, Destination: req.Destination}
+		if err, ok := calendarErrors[key]; ok {
+			return nil, err
+		}
+		if res, ok := calendarResults[key]; ok {
+			return res, nil
+		}
+		return emptyCalendarGrid(req.DepartureDate, req.ReturnDate), nil
 	})
 
 	fake.SortByPriceCalls(func(itins *[]itinery.Itinery) {
@@ -259,7 +307,11 @@ func TestSearch_SecondLegUsesFirstArrivalTime(t *testing.T) {
 		Inbound:  makeLeg("JFK", "LHR", baseTime.Add(7*24*time.Hour), baseTime.Add(7*24*time.Hour+8*time.Hour), 0),
 		Price:    300.0,
 	}
-	fake := setupFake(
+	windowStart := normalizeDay(firstLeg.Outbound.ArrivalTime)
+	windowEnd := normalizeDay(firstLeg.Inbound.DepartureTime)
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}:                {firstLeg},
@@ -271,6 +323,10 @@ func TestSearch_SecondLegUsesFirstArrivalTime(t *testing.T) {
 			{Origin: req.Origin}:      {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -280,14 +336,18 @@ func TestSearch_SecondLegUsesFirstArrivalTime(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expected := baseTime.Add(8 * time.Hour)
+	expectedDep := windowStart
+	expectedRet := windowStart.Add(24 * time.Hour)
 	found := false
 	for i := 0; i < fake.SearchCallCount(); i++ {
 		_, gotReq := fake.SearchArgsForCall(i)
 		if gotReq.Origin == "JFK" && gotReq.Destination == "LAX" {
 			found = true
-			if !gotReq.DepartureDate.Equal(expected) {
-				t.Fatalf("expected second leg departure %v, got %v", expected, gotReq.DepartureDate)
+			if !gotReq.DepartureDate.Equal(expectedDep) {
+				t.Fatalf("expected second leg departure %v, got %v", expectedDep, gotReq.DepartureDate)
+			}
+			if !gotReq.ReturnDate.Equal(expectedRet) {
+				t.Fatalf("expected second leg return %v, got %v", expectedRet, gotReq.ReturnDate)
 			}
 		}
 	}
@@ -309,7 +369,11 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 		Inbound:  makeLeg("LAX", "JFK", baseTime.Add(7*24*time.Hour-3*time.Hour), baseTime.Add(7*24*time.Hour-1*time.Hour), 0),
 		Price:    200.0,
 	}
-	fake := setupFake(
+	windowStart := normalizeDay(firstLeg.Outbound.ArrivalTime)
+	windowEnd := normalizeDay(firstLeg.Inbound.DepartureTime)
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}:                {firstLeg},
@@ -319,6 +383,10 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 		map[exploreKey][]itinery.ExploreItinery{
 			{Origin: req.Destination}: {{Destination: "JFK", Price: 100.0}},
 			{Origin: req.Origin}:      {},
+		},
+		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
 		},
 		nil,
 	)
@@ -345,7 +413,7 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 	}
 }
 
-func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
+func TestSearch_EndToEnd_NoValidBounds(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 1000.0)
 	firstLeg := itinery.Itinery{
@@ -355,10 +423,14 @@ func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
 	}
 	secondLeg := itinery.Itinery{
 		Outbound: makeLeg("JFK", "LAX", baseTime.Add(8*time.Hour+30*time.Minute), baseTime.Add(13*time.Hour), 0),
-		Inbound:  makeLeg("LAX", "JFK", baseTime.Add(7*24*time.Hour-3*time.Hour), baseTime.Add(7*24*time.Hour-1*time.Hour), 0),
+		Inbound:  makeLeg("LAX", "JFK", baseTime.Add(7*24*time.Hour+9*time.Hour), baseTime.Add(7*24*time.Hour+11*time.Hour), 0),
 		Price:    200.0,
 	}
-	fake := setupFake(
+	windowStart := normalizeDay(firstLeg.Outbound.ArrivalTime)
+	windowEnd := normalizeDay(firstLeg.Inbound.DepartureTime)
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}:                {firstLeg},
@@ -370,6 +442,10 @@ func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
 			{Origin: req.Origin}:      {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -379,14 +455,21 @@ func TestSearch_EndToEnd_NoValidLayover(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if countResults(results) != 0 {
-		t.Errorf("expected 0 results with invalid layover, got %d", countResults(results))
+		t.Errorf("expected 0 results with invalid bounds, got %d", countResults(results))
 	}
 }
 
 func TestSearch_EndToEnd_MultipleStops(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 1000.0)
-	fake := setupFake(
+	windowStartJFK := normalizeDay(baseTime.Add(8 * time.Hour))
+	windowEndJFK := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	windowStartORD := normalizeDay(baseTime.Add(9 * time.Hour))
+	windowEndORD := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	gridJFK := calendarGridWithPrice(windowStartJFK, windowEndJFK, 0, 1, 200.0)
+	gridORD := calendarGridWithPrice(windowStartORD, windowEndORD, 0, 1, 150.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}: {
@@ -427,6 +510,11 @@ func TestSearch_EndToEnd_MultipleStops(t *testing.T) {
 			{Origin: req.Origin}: {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: gridJFK,
+			{Origin: "ORD", Destination: "LAX"}: gridORD,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -457,7 +545,11 @@ func TestSearch_EndToEnd_MultipleStops(t *testing.T) {
 func TestSearch_ResultsSortedByPrice(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 2000.0)
-	fake := setupFake(
+	windowStart := normalizeDay(baseTime.Add(8 * time.Hour))
+	windowEnd := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}: {
@@ -486,6 +578,10 @@ func TestSearch_ResultsSortedByPrice(t *testing.T) {
 			{Origin: req.Origin}:      {},
 		},
 		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
+		},
+		nil,
 	)
 
 	s := New(context.Background(), fake)
@@ -508,7 +604,14 @@ func TestSearch_ResultsSortedByPrice(t *testing.T) {
 func TestSearch_BothExploreDirections(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 2000.0)
-	fake := setupFake(
+	windowStartJFK := normalizeDay(baseTime.Add(8 * time.Hour))
+	windowEndJFK := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	windowStartDUB := normalizeDay(baseTime.Add(1 * time.Hour))
+	windowEndDUB := normalizeDay(baseTime.Add(7 * 24 * time.Hour))
+	gridJFK := calendarGridWithPrice(windowStartJFK, windowEndJFK, 0, 1, 200.0)
+	gridDUB := calendarGridWithPrice(windowStartDUB, windowEndDUB, 0, 1, 80.0)
+
+	fake := setupFakeWithCalendar(
 		map[searchKey][]itinery.Itinery{
 			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
 			{Origin: "LHR", Destination: "JFK"}: {
@@ -537,6 +640,11 @@ func TestSearch_BothExploreDirections(t *testing.T) {
 		map[exploreKey][]itinery.ExploreItinery{
 			{Origin: req.Destination}: {{Destination: "JFK", Price: 50.0}},
 			{Origin: req.Origin}:      {{Destination: "DUB", Price: 30.0}},
+		},
+		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: gridJFK,
+			{Origin: "DUB", Destination: "LAX"}: gridDUB,
 		},
 		nil,
 	)
