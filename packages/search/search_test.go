@@ -413,6 +413,59 @@ func TestSearch_EndToEnd_ValidCombination(t *testing.T) {
 	}
 }
 
+func TestSearch_ResultsChannelReceivesAndCloses(t *testing.T) {
+	req := defaultRequest()
+	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 2000.0)
+	firstLeg := itinery.Itinery{
+		Outbound: makeLeg("LHR", "JFK", baseTime, baseTime.Add(8*time.Hour), 0),
+		Inbound:  makeLeg("JFK", "LHR", baseTime.Add(7*24*time.Hour), baseTime.Add(7*24*time.Hour+8*time.Hour), 0),
+		Price:    300.0,
+	}
+	secondLeg := itinery.Itinery{
+		Outbound: makeLeg("JFK", "LAX", baseTime.Add(12*time.Hour), baseTime.Add(17*time.Hour), 0),
+		Inbound:  makeLeg("LAX", "JFK", baseTime.Add(7*24*time.Hour-3*time.Hour), baseTime.Add(7*24*time.Hour-1*time.Hour), 0),
+		Price:    200.0,
+	}
+	windowStart := normalizeDay(firstLeg.Outbound.ArrivalTime)
+	windowEnd := normalizeDay(firstLeg.Inbound.DepartureTime)
+	grid := calendarGridWithPrice(windowStart, windowEnd, 0, 1, 200.0)
+
+	fake := setupFakeWithCalendar(
+		map[searchKey][]itinery.Itinery{
+			{Origin: req.Origin, Destination: req.Destination}: {baseItin},
+			{Origin: "LHR", Destination: "JFK"}:                {firstLeg},
+			{Origin: "JFK", Destination: "LAX"}:                {secondLeg},
+		},
+		nil,
+		map[exploreKey][]itinery.ExploreItinery{
+			{Origin: req.Destination}: {{Destination: "JFK", Price: 100.0}},
+			{Origin: req.Origin}:      {},
+		},
+		nil,
+		map[searchKey][][]float64{
+			{Origin: "JFK", Destination: "LAX"}: grid,
+		},
+		nil,
+	)
+
+	s := New(context.Background(), fake)
+	ch := s.RegisterResultsChannel(10)
+	results, err := s.Search(req)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	collected := make([]Result, 0)
+	for r := range ch {
+		collected = append(collected, r)
+	}
+
+	if len(collected) != countResults(results) {
+		t.Fatalf("expected %d streamed results, got %d", countResults(results), len(collected))
+	}
+}
+
 func TestSearch_EndToEnd_NoValidBounds(t *testing.T) {
 	req := defaultRequest()
 	baseItin := makeItin("LHR", "LAX", baseTime, baseTime.Add(11*time.Hour), 1000.0)

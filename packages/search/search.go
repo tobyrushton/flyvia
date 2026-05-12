@@ -14,10 +14,14 @@ import (
 )
 
 const maxCalendarCandidates = 5
+const defaultResultsBuffer = 128
 
 type Search struct {
 	ctx context.Context
 	p   provider.Provider
+
+	resultsMu sync.Mutex
+	resultsCh chan Result
 }
 
 func New(
@@ -34,7 +38,21 @@ func (s *Search) Search(req provider.Request) (map[string][]Result, error) {
 	return s.doSearch(req)
 }
 
+func (s *Search) RegisterResultsChannel(buffer int) <-chan Result {
+	if buffer <= 0 {
+		buffer = defaultResultsBuffer
+	}
+
+	s.resultsMu.Lock()
+	defer s.resultsMu.Unlock()
+	if s.resultsCh == nil {
+		s.resultsCh = make(chan Result, buffer)
+	}
+	return s.resultsCh
+}
+
 func (s *Search) doSearch(req provider.Request) (map[string][]Result, error) {
+	defer s.closeResultsChannel()
 	// explore origins and destinations in parallel
 	// expand reasonable first legs to get actual itineries with flight prices.
 	// then expand these to get the second legs of the journeys.
@@ -70,6 +88,26 @@ func (s *Search) doSearch(req provider.Request) (map[string][]Result, error) {
 		firstOr, secondOr,
 		firstDest, secondDest,
 	)
+}
+
+func (s *Search) emitResult(result Result) {
+	s.resultsMu.Lock()
+	defer s.resultsMu.Unlock()
+	if s.resultsCh == nil {
+		return
+	}
+
+	s.resultsCh <- result
+}
+
+func (s *Search) closeResultsChannel() {
+	s.resultsMu.Lock()
+	defer s.resultsMu.Unlock()
+	if s.resultsCh == nil {
+		return
+	}
+	close(s.resultsCh)
+	s.resultsCh = nil
 }
 
 func (s *Search) explore(req provider.Request) ([]itinery.ExploreItinery, []itinery.ExploreItinery, error) {
@@ -434,6 +472,7 @@ func (s *Search) combineItineraries(
 		res := combine.OneStopWithinBounds(stop[0], stop[1])
 		for _, r := range res {
 			result := NewResult(r.First, r.Second)
+			s.emitResult(result)
 			results[result.StopCity] = append(results[result.StopCity], result)
 		}
 	}
@@ -441,6 +480,7 @@ func (s *Search) combineItineraries(
 		res := combine.OneStopWithinBounds(stop[0], stop[1])
 		for _, r := range res {
 			result := NewResult(r.First, r.Second)
+			s.emitResult(result)
 			results[result.StopCity] = append(results[result.StopCity], result)
 		}
 	}
